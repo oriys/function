@@ -1,0 +1,327 @@
+# ============================================================================
+# PriorityClass 配置文件
+# ============================================================================
+# 文件说明: 定义 Pod 优先级，控制调度和抢占行为
+#
+# PriorityClass 的作用:
+# - 定义 Pod 的调度优先级
+# - 资源不足时，高优先级 Pod 可以抢占低优先级 Pod
+# - 影响调度队列中的排序
+#
+# 优先级值范围:
+# - 用户自定义: -2147483648 到 1000000000
+# - 系统保留: 1000000000 以上 (system-cluster-critical, system-node-critical)
+#
+# 抢占 (Preemption):
+# - 当高优先级 Pod 无法调度时，调度器会尝试抢占低优先级 Pod
+# - 被抢占的 Pod 会收到 SIGTERM，有 terminationGracePeriodSeconds 时间优雅退出
+# - 可以通过 preemptionPolicy 控制抢占行为
+#
+# 面试常问:
+# 1. PriorityClass 如何影响调度? (队列排序 + 抢占)
+# 2. 抢占是如何工作的? (驱逐低优先级 Pod)
+# 3. preemptionPolicy 的两个选项? (PreemptLowerPriority vs Never)
+# 4. globalDefault 的作用? (没有指定 priorityClassName 的 Pod 使用)
+# 5. 系统组件使用什么 PriorityClass? (system-cluster-critical, system-node-critical)
+# ============================================================================
+
+---
+# ============================================================================
+# PriorityClass 1: 关键系统服务 (最高优先级)
+# ============================================================================
+# 用于: 监控、日志、网络等关键基础设施
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: system-critical
+  labels:
+    app: nimbus
+    tier: system
+# 优先级值 - 接近系统级别但低于 K8s 内置
+value: 900000000
+# 是否为全局默认 - false 表示需要显式指定
+globalDefault: false
+# 抢占策略
+# PreemptLowerPriority: 可以抢占低优先级 Pod (默认)
+# Never: 不抢占，只影响调度队列排序
+preemptionPolicy: PreemptLowerPriority
+# 描述
+description: |
+  用于关键系统服务 (监控、日志、网络插件等)。
+  这些服务对集群运行至关重要，应该始终保持运行。
+  可以抢占其他非系统级 Pod。
+
+---
+# ============================================================================
+# PriorityClass 2: 高优先级业务
+# ============================================================================
+# 用于: 核心业务服务、API 网关、数据库
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: high-priority
+  labels:
+    app: nimbus
+    tier: high
+value: 100000
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority
+description: |
+  用于高优先级业务服务 (API 网关、核心服务、数据库等)。
+  资源紧张时可以抢占普通优先级的 Pod。
+
+---
+# ============================================================================
+# PriorityClass 3: 普通优先级 (默认)
+# ============================================================================
+# 用于: 一般业务服务
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: normal-priority
+  labels:
+    app: nimbus
+    tier: normal
+value: 10000
+# 设置为全局默认
+# 没有指定 priorityClassName 的 Pod 会使用这个
+globalDefault: true
+preemptionPolicy: PreemptLowerPriority
+description: |
+  默认优先级，用于一般业务服务。
+  大多数应用应该使用这个优先级。
+
+---
+# ============================================================================
+# PriorityClass 4: 低优先级
+# ============================================================================
+# 用于: 非关键服务、批处理任务、开发测试
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: low-priority
+  labels:
+    app: nimbus
+    tier: low
+value: 1000
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority
+description: |
+  低优先级，用于非关键服务。
+  资源紧张时会被高优先级 Pod 抢占。
+
+---
+# ============================================================================
+# PriorityClass 5: 尽力而为 (最低优先级)
+# ============================================================================
+# 用于: 可中断的批处理任务、预热任务
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: best-effort
+  labels:
+    app: nimbus
+    tier: best-effort
+value: 100
+globalDefault: false
+# 不抢占其他 Pod
+preemptionPolicy: Never
+description: |
+  尽力而为优先级，用于可中断的任务。
+  不会抢占其他 Pod，只在有空闲资源时运行。
+  适合批处理、数据分析、预热等任务。
+
+---
+# ============================================================================
+# PriorityClass 6: 不可抢占的高优先级
+# ============================================================================
+# 用于: 需要高优先级调度但不应抢占其他 Pod 的服务
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: high-priority-non-preempting
+  labels:
+    app: nimbus
+    tier: high
+value: 100000
+globalDefault: false
+# 不抢占 - 只影响调度队列中的位置
+preemptionPolicy: Never
+description: |
+  高优先级但不抢占。
+  在调度队列中排在前面，但不会驱逐已运行的 Pod。
+  适合需要快速调度但不应影响现有服务的场景。
+
+---
+# ============================================================================
+# 使用示例: 高优先级 Deployment
+# ============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-gateway
+  labels:
+    app: api-gateway
+    tier: high
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: api-gateway
+  template:
+    metadata:
+      labels:
+        app: api-gateway
+    spec:
+      # 指定优先级类
+      priorityClassName: high-priority
+
+      containers:
+        - name: gateway
+          image: nginx:alpine
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 1Gi
+
+---
+# ============================================================================
+# 使用示例: 低优先级批处理 Job
+# ============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: data-processing
+  labels:
+    app: data-processing
+    tier: low
+spec:
+  template:
+    spec:
+      # 使用尽力而为优先级
+      priorityClassName: best-effort
+
+      restartPolicy: OnFailure
+      containers:
+        - name: processor
+          image: python:3.11-slim
+          command: ["python", "-c", "print('Processing data...')"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+
+---
+# ============================================================================
+# 使用示例: 系统关键服务
+# ============================================================================
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: log-collector
+  labels:
+    app: log-collector
+    tier: system
+spec:
+  selector:
+    matchLabels:
+      app: log-collector
+  template:
+    metadata:
+      labels:
+        app: log-collector
+    spec:
+      # 使用系统关键优先级
+      priorityClassName: system-critical
+
+      # 容忍所有污点，确保在所有节点运行
+      tolerations:
+        - operator: Exists
+
+      containers:
+        - name: collector
+          image: fluent/fluent-bit:latest
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+
+---
+# ============================================================================
+# ResourceQuota 与 PriorityClass 结合使用
+# ============================================================================
+# 作用: 限制特定优先级的资源使用
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: high-priority-quota
+  labels:
+    app: nimbus
+spec:
+  hard:
+    # 限制高优先级 Pod 的总数和资源
+    pods: "20"
+    requests.cpu: "10"
+    requests.memory: 20Gi
+  # 只对高优先级 Pod 生效
+  scopeSelector:
+    matchExpressions:
+      - operator: In
+        scopeName: PriorityClass
+        values:
+          - high-priority
+
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: low-priority-quota
+  labels:
+    app: nimbus
+spec:
+  hard:
+    # 限制低优先级 Pod 的资源 (可以设置更宽松)
+    pods: "100"
+    requests.cpu: "20"
+    requests.memory: 40Gi
+  scopeSelector:
+    matchExpressions:
+      - operator: In
+        scopeName: PriorityClass
+        values:
+          - low-priority
+          - best-effort
+
+---
+# ============================================================================
+# 优先级规划建议
+# ============================================================================
+#
+# 优先级值参考:
+# +---------------------------+-------------+------------------+
+# | PriorityClass             | Value       | 使用场景         |
+# +---------------------------+-------------+------------------+
+# | system-node-critical      | 2000001000  | K8s 系统 (内置)  |
+# | system-cluster-critical   | 2000000000  | K8s 系统 (内置)  |
+# | system-critical           | 900000000   | 监控/日志/网络   |
+# | high-priority             | 100000      | API/数据库/核心  |
+# | normal-priority (default) | 10000       | 一般业务服务     |
+# | low-priority              | 1000        | 非关键服务       |
+# | best-effort               | 100         | 批处理/预热      |
+# +---------------------------+-------------+------------------+
+#
+# 最佳实践:
+# 1. 为不同类型的工作负载定义清晰的优先级层次
+# 2. 使用 ResourceQuota 限制高优先级资源使用
+# 3. 批处理任务使用 preemptionPolicy: Never
+# 4. 监控抢占事件: kubectl get events --field-selector reason=Preempted
+# 5. 设置合理的 terminationGracePeriodSeconds 以便优雅退出
+#
+# 查看命令:
+# kubectl get priorityclass
+# kubectl describe priorityclass high-priority
+# kubectl get pods -o custom-columns='NAME:.metadata.name,PRIORITY:.spec.priorityClassName'
+# ============================================================================

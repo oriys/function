@@ -1,0 +1,227 @@
+# ============================================================================
+# ResourceQuota 和 LimitRange 配置文件
+# ============================================================================
+# 文件说明: 定义命名空间级别的资源配额和单个 Pod/容器的资源限制
+#
+# ResourceQuota 的作用:
+# - 限制 namespace 级别的资源使用总量
+# - 防止一个团队/项目用光所有集群资源
+# - 适用于多租户集群的资源管理
+#
+# LimitRange 的作用:
+# - 设置单个 Pod/Container 的资源默认值和限制
+# - 确保每个 Pod 都有资源限制
+# - 防止单个 Pod 耗尽节点资源
+#
+# 面试常问:
+# 1. ResourceQuota 和 LimitRange 的区别? (总量 vs 单个 Pod)
+# 2. 如果 namespace 没有 ResourceQuota，有什么风险?
+# 3. 如何计算 requests 和 limits?
+# 4. 如果 Pod 没有设置 resources，会发生什么? (使用 LimitRange 默认值)
+# 5. LimitRange 的 min/max/default/defaultRequest 分别是什么?
+# ============================================================================
+
+---
+# ============================================================================
+# ResourceQuota 1: 计算资源配额
+# ============================================================================
+# 作用: 限制 namespace 内所有 Pod 的 CPU 和内存总量
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  # 配额名称
+  name: compute-quota
+  # 标签
+  labels:
+    quota: compute
+spec:
+  # 资源硬限制
+  hard:
+    # ----------------------------------------
+    # CPU 配额
+    # ----------------------------------------
+    # requests.cpu: 所有 Pod 的 CPU requests 总和上限
+    requests.cpu: "20"        # 总 CPU requests 不超过 20 核
+    # limits.cpu: 所有 Pod 的 CPU limits 总和上限
+    limits.cpu: "40"          # 总 CPU limits 不超过 40 核
+
+    # ----------------------------------------
+    # 内存配额
+    # ----------------------------------------
+    # requests.memory: 所有 Pod 的内存 requests 总和上限
+    requests.memory: 40Gi     # 总内存 requests 不超过 40Gi
+    # limits.memory: 所有 Pod 的内存 limits 总和上限
+    limits.memory: 80Gi       # 总内存 limits 不超过 80Gi
+
+    # ----------------------------------------
+    # GPU 配额 (如果集群有 GPU 节点)
+    # ----------------------------------------
+    # requests.nvidia.com/gpu: GPU 数量上限
+    requests.nvidia.com/gpu: "2"  # 最多使用 2 个 GPU
+
+---
+# ============================================================================
+# ResourceQuota 2: 对象数量配额
+# ============================================================================
+# 作用: 限制 namespace 内各类 Kubernetes 对象的数量
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: object-quota
+  labels:
+    quota: objects
+spec:
+  hard:
+    # ----------------------------------------
+    # Pod 和 Deployment 数量
+    # ----------------------------------------
+    # pods: Pod 总数上限
+    pods: "50"                    # 最多 50 个 Pod
+    # count/deployments.apps: Deployment 总数上限
+    count/deployments.apps: "20"  # 最多 20 个 Deployment
+
+    # ----------------------------------------
+    # Service 数量
+    # ----------------------------------------
+    # services: Service 总数上限
+    services: "20"                # 最多 20 个 Service
+    # services.loadbalancers: LoadBalancer 类型 Service 上限
+    # (LoadBalancer 会创建云厂商的负载均衡器，成本较高)
+    services.loadbalancers: "2"   # 最多 2 个 LoadBalancer
+    # services.nodeports: NodePort 类型 Service 上限
+    # (NodePort 会占用节点端口资源)
+    services.nodeports: "5"       # 最多 5 个 NodePort
+
+    # ----------------------------------------
+    # 存储配额
+    # ----------------------------------------
+    # persistentvolumeclaims: PVC 总数上限
+    persistentvolumeclaims: "10"  # 最多 10 个 PVC
+    # requests.storage: 存储总量上限
+    requests.storage: 100Gi       # 总存储不超过 100Gi
+
+    # ----------------------------------------
+    # Secret 和 ConfigMap 数量
+    # ----------------------------------------
+    # secrets: Secret 总数上限
+    secrets: "50"
+    # configmaps: ConfigMap 总数上限
+    configmaps: "50"
+
+---
+# ============================================================================
+# ResourceQuota 3: 按优先级配额 (高级用法)
+# ============================================================================
+# 作用: 针对特定优先级的 Pod 设置单独的配额
+# 使用场景: 限制高优先级 Pod 的数量，确保公平调度
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: high-priority-quota
+  labels:
+    quota: priority
+spec:
+  hard:
+    # 高优先级 Pod 最多 10 个
+    pods: "10"
+  # 范围选择器 - 只对符合条件的资源生效
+  scopeSelector:
+    matchExpressions:
+      # 选择使用 high-priority PriorityClass 的 Pod
+      - operator: In
+        scopeName: PriorityClass
+        values:
+          - high-priority
+
+---
+# ============================================================================
+# LimitRange 1: 容器资源限制
+# ============================================================================
+# 作用: 为容器设置资源默认值和限制范围
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: container-limits
+  labels:
+    limits: container
+spec:
+  limits:
+    # 容器级别限制
+    - type: Container
+      # ----------------------------------------
+      # 默认值 (如果 Pod 没有指定)
+      # ----------------------------------------
+      # default: 默认的 limits 值
+      default:
+        cpu: 500m             # 默认 CPU limit: 500 毫核
+        memory: 512Mi         # 默认内存 limit: 512 MiB
+      # defaultRequest: 默认的 requests 值
+      defaultRequest:
+        cpu: 100m             # 默认 CPU request: 100 毫核
+        memory: 128Mi         # 默认内存 request: 128 MiB
+
+      # ----------------------------------------
+      # 最大/最小限制
+      # ----------------------------------------
+      # max: 允许的最大资源量
+      max:
+        cpu: "4"              # 单个容器最多 4 核 CPU
+        memory: 8Gi           # 单个容器最多 8 GiB 内存
+      # min: 允许的最小资源量
+      min:
+        cpu: 50m              # 单个容器最少 50 毫核 CPU
+        memory: 64Mi          # 单个容器最少 64 MiB 内存
+
+      # ----------------------------------------
+      # request/limit 比例限制
+      # ----------------------------------------
+      # maxLimitRequestRatio: limit 最多是 request 的多少倍
+      # 防止设置过大的 limit 导致资源超卖
+      maxLimitRequestRatio:
+        cpu: "10"             # CPU limit 最多是 request 的 10 倍
+        memory: "4"           # 内存 limit 最多是 request 的 4 倍
+
+---
+# ============================================================================
+# LimitRange 2: Pod 级别限制
+# ============================================================================
+# 作用: 限制单个 Pod 的总资源使用量 (所有容器之和)
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: pod-limits
+  labels:
+    limits: pod
+spec:
+  limits:
+    # Pod 级别限制
+    - type: Pod
+      # Pod 内所有容器资源之和的上限
+      max:
+        cpu: "8"              # 单个 Pod 最多 8 核 CPU
+        memory: 16Gi          # 单个 Pod 最多 16 GiB 内存
+
+---
+# ============================================================================
+# LimitRange 3: PVC 存储限制
+# ============================================================================
+# 作用: 限制单个 PersistentVolumeClaim 的存储大小
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: storage-limits
+  labels:
+    limits: storage
+spec:
+  limits:
+    # PVC 级别限制
+    - type: PersistentVolumeClaim
+      # max: 单个 PVC 的最大存储量
+      max:
+        storage: 50Gi         # 单个 PVC 最大 50 GiB
+      # min: 单个 PVC 的最小存储量
+      min:
+        storage: 1Gi          # 单个 PVC 最小 1 GiB
+      # default: 如果 PVC 没有指定存储量时的默认值
+      default:
+        storage: 5Gi          # 默认 5 GiB

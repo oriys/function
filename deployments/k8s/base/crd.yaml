@@ -1,0 +1,632 @@
+# ============================================================================
+# CRD (Custom Resource Definition) 配置文件
+# ============================================================================
+# 文件说明: 定义自定义资源，扩展 Kubernetes API
+#
+# CRD 的作用:
+# - 扩展 Kubernetes API，添加自定义资源类型
+# - 让 Kubernetes 管理自定义对象 (如 Function, Database, Certificate)
+# - 配合 Controller/Operator 实现自动化运维
+#
+# CRD vs ConfigMap:
+# - CRD: 创建新的 API 端点，支持 kubectl 操作，有 schema 校验
+# - ConfigMap: 存储配置数据，无 schema 校验
+#
+# Operator 模式:
+# - CRD 定义 "是什么" (What)
+# - Controller 实现 "怎么做" (How)
+# - 通过 Reconcile 循环保持期望状态
+#
+# 面试常问:
+# 1. CRD 和 ConfigMap 的区别? (API 扩展 vs 配置存储)
+# 2. Operator 模式是什么? (CRD + Controller)
+# 3. spec 和 status 的区别? (期望状态 vs 实际状态)
+# 4. Reconcile 循环是什么? (持续对比并调整状态)
+# 5. 如何校验 CRD 数据? (OpenAPI v3 schema)
+# ============================================================================
+
+---
+# ============================================================================
+# CRD 1: Function - 函数定义
+# ============================================================================
+# 作用: 定义 Function 自定义资源，用于管理 serverless 函数
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  # CRD 名称格式: <plural>.<group>
+  name: functions.nimbus.io
+  labels:
+    app: nimbus
+  annotations:
+    # 控制器信息
+    controller-gen.kubebuilder.io/version: v0.13.0
+spec:
+  # API 组名
+  group: nimbus.io
+
+  # 资源名称 (各种形式)
+  names:
+    # 复数形式 - 用于 URL 路径
+    plural: functions
+    # 单数形式 - 用于 CLI 显示
+    singular: function
+    # 资源类型 - 用于 YAML 的 kind 字段
+    kind: Function
+    # 简写 - kubectl get fn
+    shortNames:
+      - fn
+      - func
+    # 资源分类 - kubectl get all 会包含
+    categories:
+      - all
+      - function
+
+  # 作用域: Namespaced 或 Cluster
+  scope: Namespaced
+
+  # API 版本列表
+  versions:
+    # 版本 v1alpha1
+    - name: v1alpha1
+      # 是否启用此版本
+      served: true
+      # 是否为存储版本 (只能有一个)
+      storage: true
+
+      # ----------------------------------------
+      # Schema 定义 (OpenAPI v3)
+      # ----------------------------------------
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: Function 是一个 serverless 函数的定义
+          # 必需字段
+          required:
+            - spec
+          properties:
+            # API 版本
+            apiVersion:
+              type: string
+            # 资源类型
+            kind:
+              type: string
+            # 元数据
+            metadata:
+              type: object
+
+            # ----------------------------------------
+            # Spec - 期望状态 (用户定义)
+            # ----------------------------------------
+            spec:
+              type: object
+              description: Function 的期望配置
+              required:
+                - runtime
+                - handler
+              properties:
+                # 运行时
+                runtime:
+                  type: string
+                  description: 函数运行时环境
+                  enum:
+                    - python3.9
+                    - python3.10
+                    - python3.11
+                    - nodejs18
+                    - nodejs20
+                    - go1.21
+                    - go1.24
+                  example: python3.11
+
+                # 处理函数
+                handler:
+                  type: string
+                  description: 函数入口点
+                  pattern: "^[a-zA-Z_][a-zA-Z0-9_]*\\.[a-zA-Z_][a-zA-Z0-9_]*$"
+                  example: main.handler
+
+                # 代码来源
+                codeSource:
+                  type: object
+                  description: 函数代码来源
+                  oneOf:
+                    - required: [inline]
+                    - required: [git]
+                    - required: [s3]
+                  properties:
+                    # 内联代码
+                    inline:
+                      type: string
+                      description: 内联代码内容
+                    # Git 仓库
+                    git:
+                      type: object
+                      required:
+                        - url
+                      properties:
+                        url:
+                          type: string
+                          format: uri
+                        branch:
+                          type: string
+                          default: main
+                        path:
+                          type: string
+                          default: /
+                    # S3 存储
+                    s3:
+                      type: object
+                      required:
+                        - bucket
+                        - key
+                      properties:
+                        bucket:
+                          type: string
+                        key:
+                          type: string
+                        region:
+                          type: string
+
+                # 资源限制
+                resources:
+                  type: object
+                  properties:
+                    cpu:
+                      type: string
+                      pattern: "^[0-9]+m?$"
+                      default: "100m"
+                    memory:
+                      type: string
+                      pattern: "^[0-9]+(Mi|Gi)$"
+                      default: "128Mi"
+                    timeout:
+                      type: integer
+                      minimum: 1
+                      maximum: 900
+                      default: 30
+                      description: 执行超时时间 (秒)
+
+                # 环境变量
+                env:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - name
+                    properties:
+                      name:
+                        type: string
+                      value:
+                        type: string
+                      valueFrom:
+                        type: object
+                        properties:
+                          secretKeyRef:
+                            type: object
+                            properties:
+                              name:
+                                type: string
+                              key:
+                                type: string
+
+                # 副本数
+                replicas:
+                  type: integer
+                  minimum: 0
+                  maximum: 100
+                  default: 1
+
+                # 自动扩缩容
+                scaling:
+                  type: object
+                  properties:
+                    minReplicas:
+                      type: integer
+                      minimum: 0
+                      default: 0
+                    maxReplicas:
+                      type: integer
+                      minimum: 1
+                      default: 10
+                    targetConcurrency:
+                      type: integer
+                      minimum: 1
+                      default: 100
+
+            # ----------------------------------------
+            # Status - 实际状态 (Controller 更新)
+            # ----------------------------------------
+            status:
+              type: object
+              description: Function 的当前状态
+              properties:
+                # 当前阶段
+                phase:
+                  type: string
+                  enum:
+                    - Pending
+                    - Building
+                    - Ready
+                    - Failed
+                    - Terminating
+
+                # 就绪副本数
+                readyReplicas:
+                  type: integer
+                  default: 0
+
+                # 最后部署时间
+                lastDeployedAt:
+                  type: string
+                  format: date-time
+
+                # 镜像地址
+                image:
+                  type: string
+
+                # 端点地址
+                endpoint:
+                  type: string
+
+                # 条件列表
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - type
+                      - status
+                    properties:
+                      type:
+                        type: string
+                        enum:
+                          - Available
+                          - Progressing
+                          - Degraded
+                      status:
+                        type: string
+                        enum:
+                          - "True"
+                          - "False"
+                          - Unknown
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+
+                # 观察到的代
+                observedGeneration:
+                  type: integer
+
+      # ----------------------------------------
+      # 子资源
+      # ----------------------------------------
+      subresources:
+        # 启用 /status 子资源
+        # 允许单独更新 status，不影响 spec
+        status: {}
+        # 启用 /scale 子资源 (用于 kubectl scale)
+        scale:
+          specReplicasPath: .spec.replicas
+          statusReplicasPath: .status.readyReplicas
+
+      # ----------------------------------------
+      # 额外打印列 (kubectl get 显示)
+      # ----------------------------------------
+      additionalPrinterColumns:
+        - name: Runtime
+          type: string
+          jsonPath: .spec.runtime
+          description: 运行时环境
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+          description: 当前阶段
+        - name: Ready
+          type: integer
+          jsonPath: .status.readyReplicas
+          description: 就绪副本数
+        - name: Endpoint
+          type: string
+          jsonPath: .status.endpoint
+          priority: 1  # 只在 -o wide 时显示
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+
+---
+# ============================================================================
+# CRD 2: FunctionInvocation - 函数调用记录
+# ============================================================================
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: functioninvocations.nimbus.io
+  labels:
+    app: nimbus
+spec:
+  group: nimbus.io
+  names:
+    plural: functioninvocations
+    singular: functioninvocation
+    kind: FunctionInvocation
+    shortNames:
+      - finv
+      - invocation
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          required:
+            - spec
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required:
+                - functionRef
+              properties:
+                functionRef:
+                  type: string
+                  description: 引用的 Function 名称
+                input:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                  description: 函数输入参数
+                async:
+                  type: boolean
+                  default: false
+                  description: 是否异步执行
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum:
+                    - Pending
+                    - Running
+                    - Succeeded
+                    - Failed
+                output:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                error:
+                  type: string
+                startedAt:
+                  type: string
+                  format: date-time
+                completedAt:
+                  type: string
+                  format: date-time
+                durationMs:
+                  type: integer
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Function
+          type: string
+          jsonPath: .spec.functionRef
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Duration
+          type: integer
+          jsonPath: .status.durationMs
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+
+---
+# ============================================================================
+# Function CR 示例
+# ============================================================================
+apiVersion: nimbus.io/v1alpha1
+kind: Function
+metadata:
+  name: hello-world
+  labels:
+    app: nimbus
+    team: platform
+spec:
+  runtime: python3.11
+  handler: main.handler
+  codeSource:
+    inline: |
+      def handler(event, context):
+          name = event.get('name', 'World')
+          return {
+              'statusCode': 200,
+              'body': f'Hello, {name}!'
+          }
+  resources:
+    cpu: "100m"
+    memory: "128Mi"
+    timeout: 30
+  env:
+    - name: LOG_LEVEL
+      value: info
+  replicas: 2
+  scaling:
+    minReplicas: 1
+    maxReplicas: 10
+    targetConcurrency: 100
+
+---
+# ============================================================================
+# FunctionInvocation CR 示例
+# ============================================================================
+apiVersion: nimbus.io/v1alpha1
+kind: FunctionInvocation
+metadata:
+  name: hello-world-test-001
+  labels:
+    app: nimbus
+spec:
+  functionRef: hello-world
+  input:
+    name: "Kubernetes"
+  async: false
+
+---
+# ============================================================================
+# Operator RBAC - Controller 所需权限
+# ============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nimbus-operator
+  labels:
+    app: nimbus-operator
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: nimbus-operator
+  labels:
+    app: nimbus-operator
+rules:
+  # 管理自定义资源
+  - apiGroups: ["nimbus.io"]
+    resources: ["functions", "functioninvocations"]
+    verbs: ["*"]
+  - apiGroups: ["nimbus.io"]
+    resources: ["functions/status", "functioninvocations/status"]
+    verbs: ["get", "update", "patch"]
+
+  # 管理底层资源
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["*"]
+  - apiGroups: [""]
+    resources: ["pods", "services", "configmaps", "secrets"]
+    verbs: ["*"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+
+  # 读取节点信息 (用于调度决策)
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+
+  # HPA 管理
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["*"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: nimbus-operator
+  labels:
+    app: nimbus-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: nimbus-operator
+subjects:
+  - kind: ServiceAccount
+    name: nimbus-operator
+    namespace: nimbus
+
+---
+# ============================================================================
+# Operator Deployment (简化示例)
+# ============================================================================
+# 实际 Operator 需要使用 controller-runtime 等框架开发
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nimbus-operator
+  labels:
+    app: nimbus-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nimbus-operator
+  template:
+    metadata:
+      labels:
+        app: nimbus-operator
+    spec:
+      serviceAccountName: nimbus-operator
+      containers:
+        - name: operator
+          # 假设的 Operator 镜像
+          image: ghcr.io/oriys/nimbus-operator:latest
+          imagePullPolicy: Always
+          args:
+            - --leader-elect=true
+            - --metrics-bind-address=:8080
+            - --health-probe-bind-address=:8081
+          ports:
+            - name: metrics
+              containerPort: 8080
+            - name: health
+              containerPort: 8081
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8081
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+
+---
+# ============================================================================
+# 常用 CRD 操作命令 (注释参考)
+# ============================================================================
+# 查看所有 CRD:
+# kubectl get crd
+#
+# 查看 CRD 详情:
+# kubectl describe crd functions.nimbus.io
+#
+# 查看自定义资源:
+# kubectl get functions
+# kubectl get fn  # 使用简写
+#
+# 创建自定义资源:
+# kubectl apply -f function.yaml
+#
+# 更新状态 (需要权限):
+# kubectl patch function hello-world --type=merge --subresource=status \
+#   -p '{"status":{"phase":"Ready","readyReplicas":2}}'
+#
+# 扩缩容 (因为启用了 scale 子资源):
+# kubectl scale function hello-world --replicas=5
+#
+# 删除 CRD (会删除所有该类型的资源):
+# kubectl delete crd functions.nimbus.io
+# ============================================================================

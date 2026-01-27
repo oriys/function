@@ -1,0 +1,19 @@
+# ============================================================================
+# Prometheus 配置（observability）
+# ============================================================================
+# 文件说明: Prometheus 抓取配置，默认抓取自身与 nimbus-gateway 的 /metrics。
+# ============================================================================
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: nimbus-gateway
+    # 网关暴露的 Prometheus 指标端点
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["nimbus-gateway:9090"]

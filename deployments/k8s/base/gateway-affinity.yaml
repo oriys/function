@@ -1,0 +1,187 @@
+# ============================================================================
+# Pod Affinity / Anti-Affinity / Topology Spread 配置文件
+# ============================================================================
+# 文件说明: 定义 Pod 调度约束，控制 Pod 调度到哪些节点
+#
+# 主要概念:
+# - Node Affinity: 将 Pod 调度到特定节点 (基于节点标签)
+# - Pod Affinity: 将 Pod 调度到有特定 Pod 的节点 (亲和性，就近部署)
+# - Pod Anti-Affinity: 将 Pod 调度到没有特定 Pod 的节点 (反亲和性，分散部署)
+# - Topology Spread: 在拓扑域 (节点/可用区/地域) 之间均匀分布 Pod
+# - Tolerations: 容忍节点上的污点 (Taints)，允许调度到被污染的节点
+#
+# 约束强度:
+# - requiredDuringScheduling: 硬性要求，必须满足，否则不调度
+# - preferredDuringScheduling: 软性偏好，尽量满足，不满足也可以调度
+# - IgnoredDuringExecution: 运行时忽略，即使条件不再满足也不驱逐 Pod
+#
+# 面试常问:
+# 1. requiredDuringScheduling 和 preferredDuringScheduling 的区别? (硬 vs 软约束)
+# 2. 如何实现 Pod 跨 AZ 部署? (topologyKey: topology.kubernetes.io/zone)
+# 3. nodeSelector 和 nodeAffinity 的区别? (简单 vs 复杂表达式)
+# 4. Taints/Tolerations 和 Affinity 的区别? (排斥 vs 吸引)
+# ============================================================================
+
+# API 版本
+apiVersion: apps/v1
+# 资源类型
+kind: Deployment
+# 元数据
+metadata:
+  # Deployment 名称 - 带 -ha 后缀表示高可用配置
+  name: nimbus-gateway-ha
+  labels:
+    app: nimbus-gateway
+# Deployment 规格
+spec:
+  # 副本数 - 高可用配置至少 3 个副本
+  replicas: 3
+  # Pod 选择器
+  selector:
+    matchLabels:
+      app: nimbus-gateway
+  # Pod 模板
+  template:
+    metadata:
+      labels:
+        app: nimbus-gateway
+    spec:
+      # ========================================
+      # 1. Node Affinity - 节点亲和性
+      # ========================================
+      # 作用: 将 Pod 调度到满足特定条件的节点
+      affinity:
+        nodeAffinity:
+          # 硬性要求: 必须满足，否则 Pod 无法调度
+          requiredDuringSchedulingIgnoredDuringExecution:
+            # 节点选择条件 (多个 term 之间是 OR 关系)
+            nodeSelectorTerms:
+              - matchExpressions:
+                  # 条件 1: 只调度到 Linux 节点
+                  - key: kubernetes.io/os
+                    operator: In       # 操作符: In, NotIn, Exists, DoesNotExist, Gt, Lt
+                    values:
+                      - linux
+                  # 条件 2: 只调度到 amd64 架构节点
+                  - key: kubernetes.io/arch
+                    operator: In
+                    values:
+                      - amd64
+
+          # 软性偏好: 尽量满足，不满足也可以调度
+          preferredDuringSchedulingIgnoredDuringExecution:
+            # 偏好 1: 优先调度到特定实例类型
+            - weight: 100  # 权重 1-100，越大优先级越高
+              preference:
+                matchExpressions:
+                  # 优先调度到 m5 系列实例 (AWS)
+                  - key: node.kubernetes.io/instance-type
+                    operator: In
+                    values:
+                      - m5.xlarge
+                      - m5.2xlarge
+
+        # ========================================
+        # 2. Pod Anti-Affinity - Pod 反亲和性
+        # ========================================
+        # 作用: 将 Pod 分散部署，避免单点故障
+        podAntiAffinity:
+          # 硬性要求: 同一节点不能有两个 nimbus-gateway Pod
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: nimbus-gateway
+              # 拓扑键 - 按节点主机名分散
+              topologyKey: kubernetes.io/hostname
+
+          # 软性偏好: 尽量跨可用区部署
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: nimbus-gateway
+                # 拓扑键 - 按可用区分散
+                topologyKey: topology.kubernetes.io/zone
+
+        # ========================================
+        # 3. Pod Affinity - Pod 亲和性 (可选)
+        # ========================================
+        # 作用: 将 Pod 就近部署，减少网络延迟
+        # 取消注释以启用
+        # podAffinity:
+        #   preferredDuringSchedulingIgnoredDuringExecution:
+        #     - weight: 50
+        #       podAffinityTerm:
+        #         labelSelector:
+        #           matchLabels:
+        #             app: redis      # 靠近 Redis 部署
+        #         topologyKey: kubernetes.io/hostname
+
+      # ========================================
+      # 4. Topology Spread Constraints - 拓扑分布约束
+      # ========================================
+      # 作用: 在拓扑域之间均匀分布 Pod，实现更均匀的负载分布
+      topologySpreadConstraints:
+        # 约束 1: 跨可用区均匀分布
+        - maxSkew: 1         # 最大差异 - 可用区之间的 Pod 数量差异不超过 1
+          topologyKey: topology.kubernetes.io/zone  # 按可用区分布
+          # 不满足约束时的行为:
+          # - DoNotSchedule: 不调度 (硬约束)
+          # - ScheduleAnyway: 仍然调度，但尽量满足 (软约束)
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: nimbus-gateway
+
+        # 约束 2: 跨节点均匀分布
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname  # 按节点分布
+          whenUnsatisfiable: ScheduleAnyway    # 软约束，允许不均匀
+          labelSelector:
+            matchLabels:
+              app: nimbus-gateway
+
+      # ========================================
+      # 5. Tolerations - 污点容忍
+      # ========================================
+      # 作用: 允许 Pod 调度到带有特定污点的节点
+      # 污点 (Taint) 用于标记节点，阻止普通 Pod 调度
+      # 容忍 (Toleration) 允许 Pod 忽略特定污点
+      tolerations:
+        # 容忍 master 节点的污点 (通常不需要)
+        # - key: node-role.kubernetes.io/master
+        #   operator: Exists      # 操作符: Exists (只检查 key) 或 Equal (检查 key=value)
+        #   effect: NoSchedule    # 效果: NoSchedule, PreferNoSchedule, NoExecute
+
+        # 容忍 GPU 节点的污点
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+
+        # 容忍节点不可达 (增加容忍时间)
+        # 当节点变为 NotReady 时，Pod 默认会在 300 秒后被驱逐
+        # 通过设置 tolerationSeconds 可以调整等待时间
+        - key: node.kubernetes.io/not-ready
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 300  # 5 分钟后才驱逐
+
+        - key: node.kubernetes.io/unreachable
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 300
+
+      # 容器配置
+      containers:
+        - name: gateway
+          # 容器镜像
+          image: ghcr.io/oriys/function:latest
+          # 资源配置 (其他配置省略，参考 gateway-deployment.yaml)
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi

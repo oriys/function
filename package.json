@@ -1,0 +1,22 @@
+{
+  "name": "nimbus-docs",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Docusaurus documentation site for Nimbus",
+  "scripts": {
+    "docs:start": "docusaurus start --host 127.0.0.1 --port 8000",
+    "docs:build": "docusaurus build",
+    "docs:serve": "docusaurus serve --host 127.0.0.1 --port 8000",
+    "docs:clear": "docusaurus clear"
+  },
+  "dependencies": {
+    "@docusaurus/core": "^3.6.3",
+    "@docusaurus/preset-classic": "^3.6.3",
+    "@mdx-js/react": "^3.0.0",
+    "clsx": "^2.1.1",
+    "prism-react-renderer": "^2.4.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  }
+}
+

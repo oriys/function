@@ -1,0 +1,503 @@
+# ============================================================================
+# RBAC (Role-Based Access Control) 配置文件
+# ============================================================================
+# 文件说明: 定义基于角色的访问控制，实现最小权限原则
+#
+# RBAC 核心概念:
+# - ServiceAccount: Pod 的身份标识
+# - Role: 命名空间级别的权限定义
+# - ClusterRole: 集群级别的权限定义
+# - RoleBinding: 将 Role 绑定到用户/组/ServiceAccount
+# - ClusterRoleBinding: 将 ClusterRole 绑定到用户/组/ServiceAccount
+#
+# 权限模型:
+# - 主体 (Subject): 谁需要权限 (User, Group, ServiceAccount)
+# - 资源 (Resource): 对什么资源操作 (pods, services, secrets 等)
+# - 动作 (Verb): 执行什么操作 (get, list, watch, create, update, delete 等)
+#
+# 最佳实践:
+# - 最小权限原则: 只授予必需的权限
+# - 优先使用 Role 而非 ClusterRole
+# - 定期审计权限
+# - 避免使用通配符 (*)
+#
+# 面试常问:
+# 1. Role 和 ClusterRole 的区别? (命名空间级别 vs 集群级别)
+# 2. 如何查看 ServiceAccount 的权限? (kubectl auth can-i)
+# 3. 什么是 subjects? (User, Group, ServiceAccount)
+# 4. apiGroups 为空字符串代表什么? (core API group)
+# 5. 如何实现跨命名空间权限? (ClusterRole + RoleBinding)
+# ============================================================================
+
+---
+# ============================================================================
+# ServiceAccount 1: 应用服务账号
+# ============================================================================
+# 作用: 为 nimbus-gateway 应用提供身份标识
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nimbus-gateway
+  labels:
+    app: nimbus-gateway
+    component: serviceaccount
+# 自动挂载 API 凭证
+# 设置为 false 可以禁止 Pod 访问 Kubernetes API
+automountServiceAccountToken: true
+
+---
+# ============================================================================
+# ServiceAccount 2: 运维服务账号
+# ============================================================================
+# 作用: 用于运维脚本和 CronJob
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nimbus-operator
+  labels:
+    app: nimbus
+    component: operator
+
+---
+# ============================================================================
+# ServiceAccount 3: 只读服务账号
+# ============================================================================
+# 作用: 用于监控和日志收集，只有读取权限
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nimbus-readonly
+  labels:
+    app: nimbus
+    component: readonly
+
+---
+# ============================================================================
+# Role 1: 应用角色 - 最小权限
+# ============================================================================
+# 作用: 定义应用运行所需的最小权限
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: nimbus-gateway-role
+  labels:
+    app: nimbus-gateway
+rules:
+  # ----------------------------------------
+  # ConfigMap 和 Secret 读取权限
+  # ----------------------------------------
+  # 应用需要读取配置
+  - apiGroups: [""]           # 空字符串表示 core API group
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+    # 可选: 限制只能访问特定资源
+    resourceNames: ["nimbus-config"]
+
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+    resourceNames: ["nimbus-secrets"]
+
+  # ----------------------------------------
+  # Pod 信息读取 (用于服务发现)
+  # ----------------------------------------
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+
+  # ----------------------------------------
+  # Endpoints 读取 (用于服务发现)
+  # ----------------------------------------
+  - apiGroups: [""]
+    resources: ["endpoints"]
+    verbs: ["get", "list", "watch"]
+
+  # ----------------------------------------
+  # Events 创建 (用于记录应用事件)
+  # ----------------------------------------
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+
+---
+# ============================================================================
+# Role 2: 运维角色 - 管理权限
+# ============================================================================
+# 作用: 定义运维操作所需的权限
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: nimbus-operator-role
+  labels:
+    app: nimbus
+    component: operator
+rules:
+  # ----------------------------------------
+  # 工作负载管理
+  # ----------------------------------------
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+
+  # ----------------------------------------
+  # Pod 管理
+  # ----------------------------------------
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "delete"]
+
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get", "list"]
+
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]  # 允许 exec 进入 Pod
+
+  # ----------------------------------------
+  # 配置管理
+  # ----------------------------------------
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # ----------------------------------------
+  # Service 管理
+  # ----------------------------------------
+  - apiGroups: [""]
+    resources: ["services", "endpoints"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # ----------------------------------------
+  # 批处理任务管理
+  # ----------------------------------------
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # ----------------------------------------
+  # HPA 管理
+  # ----------------------------------------
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+
+  # ----------------------------------------
+  # 事件和状态
+  # ----------------------------------------
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+
+  # ----------------------------------------
+  # PVC 管理
+  # ----------------------------------------
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+
+---
+# ============================================================================
+# Role 3: 只读角色
+# ============================================================================
+# 作用: 定义只读权限，用于监控和审计
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: nimbus-readonly-role
+  labels:
+    app: nimbus
+    component: readonly
+rules:
+  # 只允许 get, list, watch 操作
+  - apiGroups: [""]
+    resources:
+      - pods
+      - pods/log
+      - services
+      - endpoints
+      - configmaps
+      - events
+      - persistentvolumeclaims
+    verbs: ["get", "list", "watch"]
+
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - statefulsets
+      - daemonsets
+      - replicasets
+    verbs: ["get", "list", "watch"]
+
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch"]
+
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch"]
+
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "networkpolicies"]
+    verbs: ["get", "list", "watch"]
+
+---
+# ============================================================================
+# RoleBinding 1: 绑定应用角色
+# ============================================================================
+# 作用: 将 nimbus-gateway-role 绑定到 nimbus-gateway ServiceAccount
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: nimbus-gateway-binding
+  labels:
+    app: nimbus-gateway
+# 角色引用
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: nimbus-gateway-role
+# 主体 (谁获得这个角色)
+subjects:
+  - kind: ServiceAccount
+    name: nimbus-gateway
+    namespace: nimbus  # ServiceAccount 所在的命名空间
+
+---
+# ============================================================================
+# RoleBinding 2: 绑定运维角色
+# ============================================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: nimbus-operator-binding
+  labels:
+    app: nimbus
+    component: operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: nimbus-operator-role
+subjects:
+  # 绑定到 ServiceAccount
+  - kind: ServiceAccount
+    name: nimbus-operator
+    namespace: nimbus
+  # 也可以绑定到用户组 (用于 kubectl 访问)
+  - kind: Group
+    name: nimbus-operators
+    apiGroup: rbac.authorization.k8s.io
+
+---
+# ============================================================================
+# RoleBinding 3: 绑定只读角色
+# ============================================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: nimbus-readonly-binding
+  labels:
+    app: nimbus
+    component: readonly
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: nimbus-readonly-role
+subjects:
+  - kind: ServiceAccount
+    name: nimbus-readonly
+    namespace: nimbus
+  # 绑定到开发人员组
+  - kind: Group
+    name: nimbus-developers
+    apiGroup: rbac.authorization.k8s.io
+
+---
+# ============================================================================
+# ClusterRole 1: 集群级别只读
+# ============================================================================
+# 作用: 用于监控系统，需要跨命名空间读取资源
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: nimbus-cluster-reader
+  labels:
+    app: nimbus
+    component: monitoring
+rules:
+  # 节点信息 (集群级别资源)
+  - apiGroups: [""]
+    resources: ["nodes", "nodes/status", "nodes/proxy"]
+    verbs: ["get", "list", "watch"]
+
+  # 命名空间列表
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch"]
+
+  # PV (集群级别资源)
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch"]
+
+  # StorageClass
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+
+  # IngressClass
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingressclasses"]
+    verbs: ["get", "list", "watch"]
+
+  # Metrics (需要 metrics-server)
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["nodes", "pods"]
+    verbs: ["get", "list"]
+
+---
+# ============================================================================
+# ClusterRole 2: Ingress Controller 角色
+# ============================================================================
+# 作用: Ingress Controller 需要的权限 (如 Nginx Ingress)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: nimbus-ingress-controller
+  labels:
+    app: nimbus
+    component: ingress
+rules:
+  # 核心资源
+  - apiGroups: [""]
+    resources: ["configmaps", "endpoints", "nodes", "pods", "secrets"]
+    verbs: ["list", "watch"]
+
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get"]
+
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch"]
+
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+
+  # Ingress 资源
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch"]
+
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses/status"]
+    verbs: ["update"]
+
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingressclasses"]
+    verbs: ["get", "list", "watch"]
+
+  # Leader Election (HA)
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+---
+# ============================================================================
+# ClusterRoleBinding 1: 集群只读绑定
+# ============================================================================
+# 作用: 允许 nimbus-readonly 在集群级别读取资源
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: nimbus-cluster-reader-binding
+  labels:
+    app: nimbus
+    component: monitoring
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: nimbus-cluster-reader
+subjects:
+  - kind: ServiceAccount
+    name: nimbus-readonly
+    namespace: nimbus
+
+---
+# ============================================================================
+# 聚合 ClusterRole (高级用法)
+# ============================================================================
+# 作用: 通过标签自动聚合权限
+# 当创建带有 rbac.nimbus.io/aggregate-to-admin: "true" 标签的 ClusterRole 时
+# 权限会自动添加到这个聚合角色中
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: nimbus-admin-aggregate
+  labels:
+    app: nimbus
+aggregationRule:
+  clusterRoleSelectors:
+    - matchLabels:
+        rbac.nimbus.io/aggregate-to-admin: "true"
+rules: []  # 规则由聚合自动填充
+
+---
+# ============================================================================
+# 可聚合的 ClusterRole 示例
+# ============================================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: nimbus-custom-resources
+  labels:
+    app: nimbus
+    # 这个标签使此角色被聚合到 function-admin-aggregate
+    rbac.nimbus.io/aggregate-to-admin: "true"
+rules:
+  # 自定义资源权限
+  - apiGroups: ["nimbus.io"]
+    resources: ["functions", "invocations"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+---
+# ============================================================================
+# 开发环境宽松权限 (仅用于开发，生产环境勿用)
+# ============================================================================
+# 警告: 此角色权限过大，仅用于开发测试环境
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: nimbus-dev-admin
+  labels:
+    app: nimbus
+    environment: development
+  annotations:
+    description: "开发环境管理员角色，权限较大，勿用于生产"
+rules:
+  # 警告: 使用通配符，仅限开发环境
+  - apiGroups: ["", "apps", "batch", "autoscaling", "networking.k8s.io"]
+    resources: ["*"]
+    verbs: ["*"]
+
+---
+# ============================================================================
+# 常用 kubectl 权限检查命令 (注释参考)
+# ============================================================================
+# 检查当前用户权限:
+# kubectl auth can-i create pods
+# kubectl auth can-i list secrets --as=system:serviceaccount:function:nimbus-gateway
+#
+# 检查 ServiceAccount 权限:
+# kubectl auth can-i --list --as=system:serviceaccount:function:nimbus-gateway
+#
+# 查看角色详情:
+# kubectl describe role nimbus-gateway-role -n nimbus
+#
+# 查看绑定详情:
+# kubectl describe rolebinding nimbus-gateway-binding -n nimbus
+#
+# 获取所有角色:
+# kubectl get roles,rolebindings -n nimbus
+# kubectl get clusterroles,clusterrolebindings | grep function

@@ -1,0 +1,183 @@
+# ============================================================================
+# HPA (Horizontal Pod Autoscaler) 配置文件
+# ============================================================================
+# 文件说明: 定义 Nimbus Gateway 的水平 Pod 自动扩缩容配置
+#
+# HPA 的作用:
+# - 根据指标 (CPU、内存、自定义指标) 自动调整 Pod 副本数
+# - 在负载增加时自动扩容，保证服务质量
+# - 在负载降低时自动缩容，节省资源成本
+#
+# 前提条件:
+# - 需要 metrics-server 提供 CPU/Memory 指标
+# - 自定义指标需要 Prometheus Adapter 或其他 custom.metrics.k8s.io 实现
+#
+# 扩缩容算法:
+# desiredReplicas = ceil[currentReplicas * (currentMetric / desiredMetric)]
+#
+# 面试常问:
+# 1. HPA 和 VPA 的区别? (水平 vs 垂直扩展)
+# 2. HPA 的冷却时间是多少? (默认 5 分钟)
+# 3. 如何基于自定义指标扩缩容? (Prometheus Adapter + custom.metrics.k8s.io)
+# 4. 扩容和缩容的速率如何控制? (behavior 字段)
+# 5. HPA 和 Deployment replicas 冲突时怎么办? (HPA 优先)
+# ============================================================================
+
+# API 版本: autoscaling 组 v2 版本 (支持更多指标类型)
+apiVersion: autoscaling/v2
+# 资源类型: HorizontalPodAutoscaler
+kind: HorizontalPodAutoscaler
+# 元数据
+metadata:
+  # HPA 名称
+  name: nimbus-gateway
+  # 标签
+  labels:
+    app: nimbus-gateway
+# HPA 规格
+spec:
+  # ----------------------------------------
+  # 扩缩容目标
+  # ----------------------------------------
+  scaleTargetRef:
+    # 目标资源 API 版本
+    apiVersion: apps/v1
+    # 目标资源类型
+    kind: Deployment
+    # 目标 Deployment 名称
+    name: nimbus-gateway
+
+  # ----------------------------------------
+  # 副本数范围
+  # ----------------------------------------
+  # 最小副本数 - 保证高可用，至少 2 个实例
+  minReplicas: 2
+  # 最大副本数 - 限制资源使用上限
+  maxReplicas: 10
+
+  # ----------------------------------------
+  # 扩缩容指标 (可以配置多个，取需要副本数最大的指标)
+  # ----------------------------------------
+  metrics:
+    # 指标 1: CPU 使用率
+    - type: Resource   # 资源类型指标 (CPU/Memory)
+      resource:
+        name: cpu      # 指标名称
+        target:
+          type: Utilization       # 目标类型: 利用率
+          averageUtilization: 70  # CPU 平均使用率超过 70% 触发扩容
+
+    # 指标 2: 内存使用率
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80  # 内存平均使用率超过 80% 触发扩容
+
+    # ----------------------------------------
+    # 指标 3: 自定义指标 - 每秒请求数 (需要 Prometheus Adapter)
+    # ----------------------------------------
+    # 取消注释以启用基于 RPS 的扩缩容
+    # - type: Pods       # Pod 级别自定义指标
+    #   pods:
+    #     metric:
+    #       name: http_requests_per_second  # Prometheus 指标名称
+    #     target:
+    #       type: AverageValue
+    #       averageValue: "1000"  # 每个 Pod 处理 1000 RPS 时触发扩容
+
+    # ----------------------------------------
+    # 指标 4: 外部指标 - 队列长度 (需要 External Metrics)
+    # ----------------------------------------
+    # 取消注释以启用基于队列长度的扩缩容
+    # - type: External   # 外部指标
+    #   external:
+    #     metric:
+    #       name: scheduler_queue_length  # 外部指标名称
+    #       selector:
+    #         matchLabels:
+    #           app: nimbus-gateway
+    #     target:
+    #       type: AverageValue
+    #       averageValue: "100"  # 队列长度超过 100 触发扩容
+
+  # ----------------------------------------
+  # 扩缩容行为控制 (精细控制扩缩容速率)
+  # ----------------------------------------
+  behavior:
+    # 扩容行为 - 快速响应负载增加
+    scaleUp:
+      # 稳定窗口时间 - 0 表示立即扩容，不等待稳定
+      stabilizationWindowSeconds: 0
+      # 扩容策略 (可配置多个，selectPolicy 决定如何选择)
+      policies:
+        # 策略 1: 按百分比扩容
+        - type: Percent
+          value: 100         # 每次最多扩容 100% (即副本数翻倍)
+          periodSeconds: 15  # 每 15 秒最多执行一次
+        # 策略 2: 按 Pod 数扩容
+        - type: Pods
+          value: 4           # 每次最多增加 4 个 Pod
+          periodSeconds: 15
+      # 策略选择方式: Max 表示取两个策略计算结果的最大值
+      selectPolicy: Max
+
+    # 缩容行为 - 保守缩容，防止抖动
+    scaleDown:
+      # 稳定窗口时间 - 5 分钟内负载持续降低才缩容
+      stabilizationWindowSeconds: 300
+      # 缩容策略
+      policies:
+        # 策略: 按百分比缩容
+        - type: Percent
+          value: 10          # 每次最多缩容 10%
+          periodSeconds: 60  # 每 60 秒最多执行一次
+      # 策略选择方式: Min 表示取最小值，更保守
+      selectPolicy: Min
+
+---
+# ============================================================================
+# VPA (Vertical Pod Autoscaler) 配置 - 可选
+# ============================================================================
+# 作用: 自动调整 Pod 的 CPU 和内存 requests/limits
+#
+# 前提条件:
+# - 需要安装 VPA 组件: https://github.com/kubernetes/autoscaler/tree/master/vertical-pod-autoscaler
+#
+# 注意:
+# - VPA 和 HPA 同时使用 CPU/Memory 指标时可能冲突
+# - 建议: HPA 基于 CPU，VPA 只调整 Memory；或 HPA 基于自定义指标
+#
+# 取消注释以启用 VPA
+# ============================================================================
+# apiVersion: autoscaling.k8s.io/v1
+# kind: VerticalPodAutoscaler
+# metadata:
+#   name: nimbus-gateway-vpa
+# spec:
+#   # 目标资源
+#   targetRef:
+#     apiVersion: apps/v1
+#     kind: Deployment
+#     name: nimbus-gateway
+#   # 更新策略
+#   updatePolicy:
+#     # 更新模式:
+#     # - "Off": 只推荐，不自动更新
+#     # - "Initial": 只在 Pod 创建时应用
+#     # - "Recreate": 通过重建 Pod 来应用 (会导致短暂中断)
+#     # - "Auto": 自动选择最佳方式
+#     updateMode: "Auto"
+#   # 资源策略
+#   resourcePolicy:
+#     containerPolicies:
+#       - containerName: gateway
+#         # 最小允许资源
+#         minAllowed:
+#           cpu: 100m
+#           memory: 128Mi
+#         # 最大允许资源
+#         maxAllowed:
+#           cpu: 4
+#           memory: 8Gi

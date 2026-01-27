@@ -1,0 +1,456 @@
+# ============================================================================
+# Cert-Manager 配置文件
+# ============================================================================
+# 文件说明: 定义 TLS 证书自动化管理
+#
+# Cert-Manager 的作用:
+# - 自动申请和续期 TLS 证书
+# - 支持多种证书颁发机构 (Let's Encrypt, Vault, 自签名等)
+# - 自动注入证书到 Ingress 和 Webhook
+#
+# 核心概念:
+# - Issuer/ClusterIssuer: 证书颁发者配置
+# - Certificate: 证书请求
+# - CertificateRequest: 证书签发请求
+# - Secret: 存储证书和私钥
+#
+# 证书类型:
+# - 自签名 (SelfSigned): 开发测试用
+# - CA: 使用自己的 CA 签发
+# - ACME: Let's Encrypt 等
+# - Vault: HashiCorp Vault
+# - Venafi: 企业级 PKI
+#
+# 面试常问:
+# 1. Issuer 和 ClusterIssuer 的区别? (命名空间级别 vs 集群级别)
+# 2. ACME 协议是什么? (自动证书管理环境)
+# 3. HTTP-01 和 DNS-01 挑战的区别? (HTTP vs DNS 验证)
+# 4. 证书续期是如何工作的? (自动在到期前 30 天续期)
+# 5. 如何验证证书状态? (kubectl describe certificate)
+# ============================================================================
+
+---
+# ============================================================================
+# ClusterIssuer 1: 自签名 (开发/测试用)
+# ============================================================================
+# 作用: 用于开发环境，快速生成自签名证书
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned-issuer
+  labels:
+    app: nimbus
+spec:
+  selfSigned: {}
+
+---
+# ============================================================================
+# ClusterIssuer 2: 内部 CA
+# ============================================================================
+# 作用: 使用内部 CA 签发证书 (内部服务间通信)
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: internal-ca-issuer
+  labels:
+    app: nimbus
+spec:
+  ca:
+    # 引用包含 CA 证书和私钥的 Secret
+    secretName: internal-ca-secret
+
+---
+# ============================================================================
+# Certificate: 创建内部 CA
+# ============================================================================
+# 作用: 首先创建一个自签名的 CA 证书
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: internal-ca
+  namespace: cert-manager  # cert-manager 命名空间
+  labels:
+    app: nimbus
+spec:
+  # 证书将存储在此 Secret
+  secretName: internal-ca-secret
+
+  # CA 证书配置
+  isCA: true
+  commonName: nimbus-internal-ca
+
+  # 有效期
+  duration: 87600h  # 10 年
+  renewBefore: 8760h  # 1 年前开始续期
+
+  # 私钥配置
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+
+  # 使用自签名颁发者创建 CA
+  issuerRef:
+    name: selfsigned-issuer
+    kind: ClusterIssuer
+    group: cert-manager.io
+
+---
+# ============================================================================
+# ClusterIssuer 3: Let's Encrypt Staging (测试用)
+# ============================================================================
+# 作用: 使用 Let's Encrypt 测试环境，用于验证配置
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+  labels:
+    app: nimbus
+spec:
+  acme:
+    # Let's Encrypt Staging 服务器
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+
+    # 注册邮箱 (证书到期会收到通知)
+    email: admin@example.com
+
+    # ACME 账号私钥存储位置
+    privateKeySecretRef:
+      name: letsencrypt-staging-account
+
+    # ----------------------------------------
+    # ACME 挑战方式
+    # ----------------------------------------
+    solvers:
+      # HTTP-01 挑战 (最常用)
+      # 需要 80 端口可访问
+      - http01:
+          ingress:
+            # 指定 Ingress 类
+            ingressClassName: nginx
+            # 或使用 Pod 模板自定义
+            # podTemplate:
+            #   spec:
+            #     nodeSelector:
+            #       ingress: "true"
+
+      # DNS-01 挑战 (支持通配符证书)
+      # 需要 DNS 提供商 API 访问权限
+      # - dns01:
+      #     cloudflare:
+      #       email: admin@example.com
+      #       apiTokenSecretRef:
+      #         name: cloudflare-api-token
+      #         key: api-token
+
+---
+# ============================================================================
+# ClusterIssuer 4: Let's Encrypt Production
+# ============================================================================
+# 作用: 生产环境使用，申请真正的证书
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+  labels:
+    app: nimbus
+spec:
+  acme:
+    # Let's Encrypt 生产服务器
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: admin@example.com
+    privateKeySecretRef:
+      name: letsencrypt-prod-account
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: nginx
+
+---
+# ============================================================================
+# Issuer: 命名空间级别 (可选)
+# ============================================================================
+# 作用: 只在特定命名空间有效
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: nimbus-issuer
+  namespace: nimbus
+  labels:
+    app: nimbus
+spec:
+  ca:
+    secretName: internal-ca-secret
+
+---
+# ============================================================================
+# Certificate 1: Webhook 证书
+# ============================================================================
+# 作用: 为 Admission Webhook 生成 TLS 证书
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: nimbus-webhook-cert
+  namespace: nimbus
+  labels:
+    app: nimbus-webhook
+spec:
+  # 证书存储位置
+  secretName: nimbus-webhook-cert
+
+  # ----------------------------------------
+  # 证书信息
+  # ----------------------------------------
+  commonName: nimbus-webhook.nimbus.svc
+
+  # DNS 名称 (SAN)
+  dnsNames:
+    - nimbus-webhook
+    - nimbus-webhook.nimbus
+    - nimbus-webhook.nimbus.svc
+    - nimbus-webhook.nimbus.svc.cluster.local
+
+  # IP 地址 (可选)
+  # ipAddresses:
+  #   - 10.0.0.1
+
+  # ----------------------------------------
+  # 证书有效期
+  # ----------------------------------------
+  # 总有效期
+  duration: 8760h  # 1 年
+  # 续期提前时间
+  renewBefore: 720h  # 30 天
+
+  # ----------------------------------------
+  # 私钥配置
+  # ----------------------------------------
+  privateKey:
+    algorithm: RSA
+    size: 2048
+    encoding: PKCS1
+    # 轮换策略
+    rotationPolicy: Always
+
+  # ----------------------------------------
+  # 用途
+  # ----------------------------------------
+  usages:
+    - server auth
+    - digital signature
+    - key encipherment
+
+  # ----------------------------------------
+  # 颁发者引用
+  # ----------------------------------------
+  issuerRef:
+    name: internal-ca-issuer
+    kind: ClusterIssuer
+    group: cert-manager.io
+
+---
+# ============================================================================
+# Certificate 2: Ingress TLS 证书 (Let's Encrypt)
+# ============================================================================
+# 作用: 为公开服务申请 Let's Encrypt 证书
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: nimbus-gateway-tls
+  namespace: nimbus
+  labels:
+    app: nimbus-gateway
+spec:
+  secretName: nimbus-gateway-tls
+
+  # 域名
+  dnsNames:
+    - nimbus.example.com
+    - api.nimbus.example.com
+
+  # 有效期
+  duration: 2160h  # 90 天 (Let's Encrypt 限制)
+  renewBefore: 720h  # 30 天前续期
+
+  # 使用 Let's Encrypt 生产环境
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+    group: cert-manager.io
+
+---
+# ============================================================================
+# Certificate 3: 通配符证书 (需要 DNS-01)
+# ============================================================================
+# 作用: 申请通配符证书，覆盖所有子域名
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: wildcard-cert
+  namespace: nimbus
+  labels:
+    app: nimbus
+spec:
+  secretName: wildcard-tls
+
+  # 通配符域名
+  dnsNames:
+    - "*.nimbus.example.com"
+    - "nimbus.example.com"
+
+  duration: 2160h
+  renewBefore: 720h
+
+  # 必须使用支持 DNS-01 的 Issuer
+  issuerRef:
+    name: letsencrypt-prod-dns
+    kind: ClusterIssuer
+    group: cert-manager.io
+
+---
+# ============================================================================
+# Ingress 自动证书 (使用注解)
+# ============================================================================
+# 作用: 通过 Ingress 注解自动申请证书
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: nimbus-gateway-auto-tls
+  namespace: nimbus
+  labels:
+    app: nimbus-gateway
+  annotations:
+    # 指定使用的 ClusterIssuer
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    # 或使用命名空间级别的 Issuer
+    # cert-manager.io/issuer: nimbus-issuer
+
+    # 可选配置
+    # cert-manager.io/duration: "2160h"
+    # cert-manager.io/renew-before: "720h"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - nimbus.example.com
+      # cert-manager 会自动创建此 Secret
+      secretName: nimbus-gateway-auto-tls
+  rules:
+    - host: nimbus.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: nimbus-gateway
+                port:
+                  number: 80
+
+---
+# ============================================================================
+# mTLS 证书 (双向 TLS)
+# ============================================================================
+# 作用: 服务间安全通信，需要客户端和服务端都验证证书
+
+# 服务端证书
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: nimbus-server-mtls
+  namespace: nimbus
+  labels:
+    app: nimbus
+spec:
+  secretName: nimbus-server-mtls
+  commonName: nimbus-server
+  dnsNames:
+    - nimbus-gateway.nimbus.svc
+  duration: 8760h
+  renewBefore: 720h
+  usages:
+    - server auth
+    - digital signature
+    - key encipherment
+  issuerRef:
+    name: internal-ca-issuer
+    kind: ClusterIssuer
+
+---
+# 客户端证书
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: nimbus-client-mtls
+  namespace: nimbus
+  labels:
+    app: nimbus
+spec:
+  secretName: nimbus-client-mtls
+  commonName: nimbus-client
+  duration: 8760h
+  renewBefore: 720h
+  usages:
+    - client auth
+    - digital signature
+    - key encipherment
+  issuerRef:
+    name: internal-ca-issuer
+    kind: ClusterIssuer
+
+---
+# ============================================================================
+# 证书状态检查命令
+# ============================================================================
+#
+# 查看所有证书:
+# kubectl get certificates -A
+#
+# 查看证书详情:
+# kubectl describe certificate nimbus-webhook-cert -n nimbus
+#
+# 查看证书状态:
+# kubectl get certificate nimbus-webhook-cert -n nimbus -o jsonpath='{.status.conditions}'
+#
+# 检查 Secret 中的证书:
+# kubectl get secret nimbus-webhook-cert -n nimbus -o jsonpath='{.data.tls\.crt}' | base64 -d | openssl x509 -text -noout
+#
+# 查看证书过期时间:
+# kubectl get secret nimbus-webhook-cert -n nimbus -o jsonpath='{.data.tls\.crt}' | base64 -d | openssl x509 -enddate -noout
+#
+# 强制续期:
+# kubectl delete certificate nimbus-webhook-cert -n nimbus
+# # 或者
+# cmctl renew nimbus-webhook-cert -n nimbus
+#
+# 查看 cert-manager 日志:
+# kubectl logs -n cert-manager -l app=cert-manager -f
+#
+# 调试证书申请:
+# kubectl get certificaterequest -n nimbus
+# kubectl describe certificaterequest <name> -n nimbus
+#
+# 调试 ACME 挑战:
+# kubectl get challenges -n nimbus
+# kubectl describe challenge <name> -n nimbus
+# ============================================================================
+
+---
+# ============================================================================
+# 安装 cert-manager (参考命令)
+# ============================================================================
+#
+# 方式 1: 使用 kubectl
+# kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.13.3/cert-manager.yaml
+#
+# 方式 2: 使用 Helm
+# helm repo add jetstack https://charts.jetstack.io
+# helm repo update
+# helm install cert-manager jetstack/cert-manager \
+#   --namespace cert-manager \
+#   --create-namespace \
+#   --set installCRDs=true
+#
+# 验证安装:
+# kubectl get pods -n cert-manager
+# cmctl check api
+# ============================================================================

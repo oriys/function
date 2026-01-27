@@ -1,0 +1,16 @@
+FROM node:20-alpine
+
+# Install ws package for WebSocket support (needed for CDP connection)
+WORKDIR /opt/dap-server
+RUN npm init -y && npm install ws
+
+# Copy the DAP server script
+COPY node-dap-server.js /opt/dap-server/
+
+# Create non-root user
+RUN adduser -D func || true
+
+WORKDIR /tmp
+
+# Default entrypoint
+ENTRYPOINT ["node"]

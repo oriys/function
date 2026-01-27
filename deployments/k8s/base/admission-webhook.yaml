@@ -1,0 +1,509 @@
+# ============================================================================
+# Admission Webhook 配置文件
+# ============================================================================
+# 文件说明: 定义准入控制 Webhook，拦截和修改 API 请求
+#
+# Admission Controller 流程:
+# API Request → Authentication → Authorization → Admission → etcd
+#                                                    ↓
+#                                    Mutating → Validating
+#
+# 两种 Webhook 类型:
+# 1. MutatingAdmissionWebhook: 修改资源 (先执行)
+#    - 注入 sidecar
+#    - 添加默认值
+#    - 添加标签/注解
+#
+# 2. ValidatingAdmissionWebhook: 验证资源 (后执行)
+#    - 检查必填字段
+#    - 验证配置格式
+#    - 安全策略检查
+#
+# 面试常问:
+# 1. Mutating 和 Validating Webhook 的执行顺序? (Mutating → Validating)
+# 2. failurePolicy 的选项? (Fail: 拒绝, Ignore: 允许)
+# 3. sideEffects 是什么? (None, NoneOnDryRun, Some, Unknown)
+# 4. Webhook 证书如何管理? (cert-manager, 自签名)
+# 5. 如何调试 Webhook? (kubectl logs, --v=8)
+# ============================================================================
+
+---
+# ============================================================================
+# MutatingWebhookConfiguration - 修改资源
+# ============================================================================
+# 作用: 在资源创建/更新时自动注入配置
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: nimbus-mutating-webhook
+  labels:
+    app: nimbus
+    component: webhook
+  annotations:
+    # cert-manager 自动注入 CA 证书
+    cert-manager.io/inject-ca-from: function/nimbus-webhook-cert
+webhooks:
+  # ----------------------------------------
+  # Webhook 1: 注入 Sidecar
+  # ----------------------------------------
+  - name: sidecar-injector.nimbus.io
+    # Webhook 服务端点
+    clientConfig:
+      # 方式 1: 使用 Service
+      service:
+        name: nimbus-webhook
+        namespace: nimbus
+        path: /mutate/inject-sidecar
+        port: 443
+      # 方式 2: 使用 URL (开发调试用)
+      # url: https://webhook.example.com/mutate
+      #
+      # CA Bundle - 由 cert-manager 注入
+      # caBundle: <base64-encoded-ca-cert>
+
+    # ----------------------------------------
+    # 规则: 匹配哪些资源
+    # ----------------------------------------
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods"]
+        scope: Namespaced
+
+    # ----------------------------------------
+    # 命名空间选择器 - 只在特定命名空间生效
+    # ----------------------------------------
+    namespaceSelector:
+      matchLabels:
+        # 只对有此标签的命名空间生效
+        nimbus.io/inject-sidecar: "enabled"
+      # 排除 kube-system 等系统命名空间
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+            - kube-system
+            - kube-public
+            - kube-node-lease
+
+    # ----------------------------------------
+    # 对象选择器 - 只对特定 Pod 生效
+    # ----------------------------------------
+    objectSelector:
+      matchLabels:
+        # 只对有此标签的 Pod 生效
+        nimbus.io/inject-sidecar: "true"
+
+    # ----------------------------------------
+    # 失败策略
+    # ----------------------------------------
+    # Fail: Webhook 失败时拒绝请求
+    # Ignore: Webhook 失败时忽略，允许请求
+    failurePolicy: Fail
+
+    # ----------------------------------------
+    # 副作用声明
+    # ----------------------------------------
+    # None: 无副作用，可以安全地在 dry-run 时调用
+    # NoneOnDryRun: dry-run 时无副作用
+    # Some: 有副作用 (如写日志、发送通知)
+    # Unknown: 未知 (不推荐)
+    sideEffects: None
+
+    # ----------------------------------------
+    # 准入审查版本
+    # ----------------------------------------
+    admissionReviewVersions: ["v1", "v1beta1"]
+
+    # ----------------------------------------
+    # 超时设置
+    # ----------------------------------------
+    timeoutSeconds: 10
+
+    # ----------------------------------------
+    # 重新调用策略
+    # ----------------------------------------
+    # Never: 不重新调用
+    # IfNeeded: 如果对象被其他 webhook 修改，则重新调用
+    reinvocationPolicy: IfNeeded
+
+    # ----------------------------------------
+    # 匹配策略
+    # ----------------------------------------
+    # Exact: 精确匹配
+    # Equivalent: 等效匹配 (考虑 API 版本转换)
+    matchPolicy: Equivalent
+
+  # ----------------------------------------
+  # Webhook 2: 添加默认标签
+  # ----------------------------------------
+  - name: default-labels.nimbus.io
+    clientConfig:
+      service:
+        name: nimbus-webhook
+        namespace: nimbus
+        path: /mutate/default-labels
+        port: 443
+    rules:
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["deployments", "statefulsets", "daemonsets"]
+        scope: Namespaced
+    namespaceSelector:
+      matchLabels:
+        nimbus.io/managed: "true"
+    failurePolicy: Ignore  # 标签注入失败不应阻止部署
+    sideEffects: None
+    admissionReviewVersions: ["v1"]
+    timeoutSeconds: 5
+
+---
+# ============================================================================
+# ValidatingWebhookConfiguration - 验证资源
+# ============================================================================
+# 作用: 在资源创建/更新时验证配置
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: nimbus-validating-webhook
+  labels:
+    app: nimbus
+    component: webhook
+  annotations:
+    cert-manager.io/inject-ca-from: function/nimbus-webhook-cert
+webhooks:
+  # ----------------------------------------
+  # Webhook 1: 验证 Pod 安全
+  # ----------------------------------------
+  - name: pod-security.nimbus.io
+    clientConfig:
+      service:
+        name: nimbus-webhook
+        namespace: nimbus
+        path: /validate/pod-security
+        port: 443
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+        scope: Namespaced
+    namespaceSelector:
+      matchLabels:
+        nimbus.io/validate-security: "enabled"
+    failurePolicy: Fail  # 安全验证失败必须拒绝
+    sideEffects: None
+    admissionReviewVersions: ["v1"]
+    timeoutSeconds: 10
+
+  # ----------------------------------------
+  # Webhook 2: 验证资源限制
+  # ----------------------------------------
+  - name: resource-limits.nimbus.io
+    clientConfig:
+      service:
+        name: nimbus-webhook
+        namespace: nimbus
+        path: /validate/resource-limits
+        port: 443
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+        scope: Namespaced
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["deployments", "statefulsets"]
+        scope: Namespaced
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+            - kube-system
+    failurePolicy: Fail
+    sideEffects: None
+    admissionReviewVersions: ["v1"]
+    timeoutSeconds: 5
+
+  # ----------------------------------------
+  # Webhook 3: 验证 Function CRD
+  # ----------------------------------------
+  - name: nimbus-validation.nimbus.io
+    clientConfig:
+      service:
+        name: nimbus-webhook
+        namespace: nimbus
+        path: /validate/function
+        port: 443
+    rules:
+      - apiGroups: ["nimbus.io"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["functions"]
+        scope: Namespaced
+    failurePolicy: Fail
+    sideEffects: None
+    admissionReviewVersions: ["v1"]
+    timeoutSeconds: 10
+
+---
+# ============================================================================
+# Webhook Service
+# ============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: nimbus-webhook
+  labels:
+    app: nimbus-webhook
+spec:
+  ports:
+    - name: https
+      port: 443
+      targetPort: 8443
+  selector:
+    app: nimbus-webhook
+
+---
+# ============================================================================
+# Webhook Deployment
+# ============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nimbus-webhook
+  labels:
+    app: nimbus-webhook
+spec:
+  replicas: 2  # 高可用
+  selector:
+    matchLabels:
+      app: nimbus-webhook
+  template:
+    metadata:
+      labels:
+        app: nimbus-webhook
+    spec:
+      serviceAccountName: nimbus-webhook
+
+      # 优先级 - Webhook 应该高优先级
+      priorityClassName: system-critical
+
+      containers:
+        - name: webhook
+          image: ghcr.io/oriys/nimbus-webhook:latest
+          imagePullPolicy: Always
+          ports:
+            - name: https
+              containerPort: 8443
+          args:
+            - --tls-cert-file=/certs/tls.crt
+            - --tls-key-file=/certs/tls.key
+            - --port=8443
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            - name: certs
+              mountPath: /certs
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8443
+              scheme: HTTPS
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8443
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+
+      volumes:
+        - name: certs
+          secret:
+            secretName: nimbus-webhook-cert
+
+      # 反亲和性 - 分散部署
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: nimbus-webhook
+                topologyKey: kubernetes.io/hostname
+
+---
+# ============================================================================
+# Webhook ServiceAccount
+# ============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nimbus-webhook
+  labels:
+    app: nimbus-webhook
+
+---
+# ============================================================================
+# Webhook RBAC
+# ============================================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: nimbus-webhook
+  labels:
+    app: nimbus-webhook
+rules:
+  # 读取 Pod 信息
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  # 读取命名空间 (检查标签)
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list"]
+  # 读取 ConfigMap (配置)
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+  # 读取 Function CRD
+  - apiGroups: ["nimbus.io"]
+    resources: ["functions"]
+    verbs: ["get", "list"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: nimbus-webhook
+  labels:
+    app: nimbus-webhook
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: nimbus-webhook
+subjects:
+  - kind: ServiceAccount
+    name: nimbus-webhook
+    namespace: nimbus
+
+---
+# ============================================================================
+# PodDisruptionBudget for Webhook
+# ============================================================================
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: nimbus-webhook-pdb
+  labels:
+    app: nimbus-webhook
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: nimbus-webhook
+
+---
+# ============================================================================
+# Namespace 标签示例 - 启用 Webhook
+# ============================================================================
+# 使用以下命令为命名空间添加标签以启用 Webhook:
+#
+# 启用 sidecar 注入:
+# kubectl label namespace <ns> nimbus.io/inject-sidecar=enabled
+#
+# 启用安全验证:
+# kubectl label namespace <ns> nimbus.io/validate-security=enabled
+#
+# 启用资源管理:
+# kubectl label namespace <ns> nimbus.io/managed=true
+
+---
+# ============================================================================
+# Webhook 配置 ConfigMap
+# ============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nimbus-webhook-config
+  labels:
+    app: nimbus-webhook
+data:
+  config.yaml: |
+    # Sidecar 注入配置
+    sidecar:
+      image: ghcr.io/oriys/nimbus-sidecar:latest
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 200m
+          memory: 128Mi
+
+    # 资源限制验证规则
+    resourceLimits:
+      maxCpu: "4"
+      maxMemory: "8Gi"
+      requireLimits: true
+      requireRequests: true
+
+    # 安全策略
+    security:
+      requireNonRoot: true
+      allowPrivilegeEscalation: false
+      requiredDropCapabilities:
+        - ALL
+
+    # 必需标签
+    requiredLabels:
+      - app
+      - team
+
+---
+# ============================================================================
+# 常用调试命令
+# ============================================================================
+#
+# 查看 Webhook 配置:
+# kubectl get mutatingwebhookconfigurations
+# kubectl get validatingwebhookconfigurations
+#
+# 查看 Webhook 详情:
+# kubectl describe mutatingwebhookconfigurations nimbus-mutating-webhook
+#
+# 测试 Webhook (创建会被拒绝的 Pod):
+# kubectl run test --image=nginx --dry-run=server -o yaml
+#
+# 调试 API 请求:
+# kubectl create -f pod.yaml -v=8
+#
+# 查看 Webhook 日志:
+# kubectl logs -n nimbus -l app=nimbus-webhook -f
+#
+# 临时禁用 Webhook:
+# kubectl delete mutatingwebhookconfigurations nimbus-mutating-webhook
+#
+# 检查证书:
+# kubectl get secret nimbus-webhook-cert -n nimbus -o jsonpath='{.data.tls\.crt}' | base64 -d | openssl x509 -text -noout
+# ============================================================================

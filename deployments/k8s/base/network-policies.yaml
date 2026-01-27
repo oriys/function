@@ -1,0 +1,302 @@
+# ============================================================================
+# NetworkPolicy 配置文件
+# ============================================================================
+# 文件说明: 定义网络策略，控制 Pod 之间的网络流量
+#
+# NetworkPolicy 的作用:
+# - 控制 Pod 之间的网络流量 (类似防火墙规则)
+# - 实现零信任网络安全模型
+# - 限制入站 (Ingress) 和出站 (Egress) 流量
+#
+# 前提条件:
+# - 需要支持 NetworkPolicy 的 CNI 插件: Calico, Cilium, Weave 等
+# - 注意: Flannel 不支持 NetworkPolicy!
+#
+# 默认行为:
+# - 没有 NetworkPolicy 时，所有 Pod 可以互相通信
+# - 一旦应用 NetworkPolicy，变为 "默认拒绝" 模式
+#
+# 面试常问:
+# 1. NetworkPolicy 是 L3/L4 还是 L7? (L3/L4, 基于 IP 和端口)
+# 2. 如何实现零信任网络?
+# 3. ingress 和 egress 的区别?
+# 4. 为什么 Flannel 不支持 NetworkPolicy?
+# ============================================================================
+
+---
+# ============================================================================
+# 策略 1: 默认拒绝所有入站流量 (零信任基础)
+# ============================================================================
+# 作用: 阻止所有未明确允许的入站流量，实现零信任网络的基础
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  # 策略名称
+  name: default-deny-ingress
+  # 标签
+  labels:
+    policy: baseline
+spec:
+  # Pod 选择器 - 空选择器表示选择 namespace 内所有 Pod
+  podSelector: {}
+  # 策略类型
+  policyTypes:
+    - Ingress    # 控制入站流量
+  # 没有定义 ingress 规则 = 拒绝所有入站流量
+
+---
+# ============================================================================
+# 策略 2: 默认拒绝所有出站流量 (但允许 DNS 查询)
+# ============================================================================
+# 作用: 阻止所有未明确允许的出站流量，同时保留 DNS 查询能力
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-egress
+  labels:
+    policy: baseline
+spec:
+  # 选择 namespace 内所有 Pod
+  podSelector: {}
+  policyTypes:
+    - Egress     # 控制出站流量
+  # 出站规则 - 只允许 DNS 查询
+  egress:
+    # 允许访问 kube-dns 服务
+    - to:
+        # 允许访问任何 namespace 中的 kube-dns Pod
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      # 允许的端口
+      ports:
+        # DNS UDP 端口
+        - protocol: UDP
+          port: 53
+        # DNS TCP 端口 (用于大型 DNS 响应)
+        - protocol: TCP
+          port: 53
+
+---
+# ============================================================================
+# 策略 3: 允许 nimbus-gateway 的入站流量
+# ============================================================================
+# 作用: 明确允许特定来源访问 Gateway 服务
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway-ingress
+  labels:
+    policy: nimbus-gateway
+spec:
+  # 选择 nimbus-gateway Pod
+  podSelector:
+    matchLabels:
+      app: nimbus-gateway
+  policyTypes:
+    - Ingress
+  ingress:
+    # 规则 1: 允许来自 Ingress Controller 的流量
+    - from:
+        # 选择 ingress-nginx 命名空间中的 Pod
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8080   # HTTP API 端口
+
+    # 规则 2: 允许来自 Prometheus 的 metrics 抓取
+    - from:
+        - podSelector:
+            matchLabels:
+              app: prometheus
+      ports:
+        - protocol: TCP
+          port: 9090   # Metrics 端口
+
+    # 规则 3: 允许同 namespace 内的健康检查
+    - from:
+        # 空选择器 = 同 namespace 的所有 Pod
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 8080
+
+---
+# ============================================================================
+# 策略 4: 允许 nimbus-gateway 的出站流量
+# ============================================================================
+# 作用: 明确允许 Gateway 访问必要的后端服务
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway-egress
+  labels:
+    policy: nimbus-gateway
+spec:
+  # 选择 nimbus-gateway Pod
+  podSelector:
+    matchLabels:
+      app: nimbus-gateway
+  policyTypes:
+    - Egress
+  egress:
+    # 规则 1: 允许访问 PostgreSQL 数据库
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - protocol: TCP
+          port: 5432   # PostgreSQL 端口
+
+    # 规则 2: 允许访问 Redis 缓存
+    - to:
+        - podSelector:
+            matchLabels:
+              app: redis
+      ports:
+        - protocol: TCP
+          port: 6379   # Redis 端口
+
+    # 规则 3: 允许访问 NATS 消息队列
+    - to:
+        - podSelector:
+            matchLabels:
+              app: nats
+      ports:
+        - protocol: TCP
+          port: 4222   # NATS 客户端端口
+
+    # 规则 4: 允许访问 Tempo (发送分布式追踪数据)
+    - to:
+        - podSelector:
+            matchLabels:
+              app: tempo
+      ports:
+        - protocol: TCP
+          port: 4317   # OTLP gRPC 端口
+
+    # 规则 5: 允许 DNS 查询
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+
+---
+# ============================================================================
+# 策略 5: 允许 Prometheus 抓取所有 Pod 的指标
+# ============================================================================
+# 作用: 让 Prometheus 能够访问所有需要监控的 Pod
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-scrape
+  labels:
+    policy: monitoring
+spec:
+  # 选择 Prometheus Pod
+  podSelector:
+    matchLabels:
+      app: prometheus
+  policyTypes:
+    - Egress
+  egress:
+    # 规则 1: 允许抓取所有 Pod 的 metrics
+    - to:
+        # 空选择器 = 所有 Pod
+        - podSelector: {}
+      ports:
+        # Prometheus 默认 metrics 端口
+        - protocol: TCP
+          port: 9090
+        # node-exporter 端口
+        - protocol: TCP
+          port: 9100
+        # 应用 HTTP 端口 (某些应用在此端口暴露 metrics)
+        - protocol: TCP
+          port: 8080
+
+    # 规则 2: 允许 DNS 查询
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+
+---
+# ============================================================================
+# 策略 6: 允许 Grafana 访问数据源
+# ============================================================================
+# 作用: 让 Grafana 能够查询监控数据源
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-grafana-egress
+  labels:
+    policy: monitoring
+spec:
+  # 选择 Grafana Pod
+  podSelector:
+    matchLabels:
+      app: grafana
+  policyTypes:
+    - Ingress    # 控制入站
+    - Egress     # 控制出站
+  # 入站规则
+  ingress:
+    # 允许来自 Ingress Controller 的流量 (Web UI 访问)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 3000   # Grafana Web 端口
+  # 出站规则
+  egress:
+    # 规则 1: 允许访问 Prometheus (查询指标)
+    - to:
+        - podSelector:
+            matchLabels:
+              app: prometheus
+      ports:
+        - protocol: TCP
+          port: 9090
+
+    # 规则 2: 允许访问 Loki (查询日志)
+    - to:
+        - podSelector:
+            matchLabels:
+              app: loki
+      ports:
+        - protocol: TCP
+          port: 3100   # Loki HTTP 端口
+
+    # 规则 3: 允许访问 Tempo (查询追踪数据)
+    - to:
+        - podSelector:
+            matchLabels:
+              app: tempo
+      ports:
+        - protocol: TCP
+          port: 3200   # Tempo HTTP 端口
+
+    # 规则 4: 允许 DNS 查询
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53

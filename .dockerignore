@@ -1,0 +1,24 @@
+.git
+.gitignore
+
+# Binaries / build outputs
+bin/
+dist/
+build/
+site/
+.docusaurus/
+
+# Node
+node_modules/
+
+# Python
+__pycache__/
+*.pyc
+
+# IDE
+.idea/
+.vscode/
+
+# OS / logs
+.DS_Store
+*.log

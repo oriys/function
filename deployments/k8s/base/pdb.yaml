@@ -1,0 +1,117 @@
+# ============================================================================
+# PodDisruptionBudget (PDB) 配置文件
+# ============================================================================
+# 文件说明: 定义 Pod 中断预算，限制自愿中断时可同时不可用的 Pod 数量
+#
+# PDB 的作用:
+# - 限制自愿中断 (voluntary disruption) 时可同时不可用的 Pod 数量
+# - 保证在节点维护、滚动更新等操作时服务的高可用性
+#
+# 自愿中断场景 (PDB 生效):
+# - kubectl drain (节点排空)
+# - 节点升级
+# - Deployment 滚动更新
+# - 集群自动扩缩容
+#
+# 非自愿中断场景 (PDB 不生效):
+# - 节点故障
+# - 内核崩溃
+# - OOM Kill
+# - 网络分区
+#
+# 面试常问:
+# 1. PDB 什么时候生效? (只对自愿中断生效)
+# 2. minAvailable 和 maxUnavailable 的区别?
+# 3. kubectl drain --ignore-daemonsets 和 PDB 的关系?
+# 4. 如果 PDB 不满足，kubectl drain 会怎样? (阻塞等待)
+# ============================================================================
+
+---
+# ============================================================================
+# PDB 1: nimbus-gateway - 保证至少 1 个 Pod 可用
+# ============================================================================
+# 作用: 在任何自愿中断期间，确保至少有 1 个 Gateway Pod 保持运行
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  # PDB 名称
+  name: nimbus-gateway-pdb
+  # 标签
+  labels:
+    app: nimbus-gateway
+spec:
+  # ----------------------------------------
+  # 方式 1: 最少可用数 (推荐)
+  # ----------------------------------------
+  # 指定最少必须保持可用的 Pod 数量
+  # 可以是整数或百分比
+  minAvailable: 1           # 至少保持 1 个 Pod 运行
+  # minAvailable: "50%"     # 或者: 至少保持 50% Pod 运行
+
+  # ----------------------------------------
+  # 方式 2: 最大不可用数 (二选一，与 minAvailable 互斥)
+  # ----------------------------------------
+  # 指定最多允许不可用的 Pod 数量
+  # maxUnavailable: 1       # 最多允许 1 个 Pod 不可用
+  # maxUnavailable: "25%"   # 或者: 最多允许 25% Pod 不可用
+
+  # Pod 选择器 - 匹配需要保护的 Pod
+  selector:
+    matchLabels:
+      app: nimbus-gateway
+
+---
+# ============================================================================
+# PDB 2: Prometheus - 保证监控可用
+# ============================================================================
+# 作用: 确保监控系统在维护期间保持可用
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: prometheus-pdb
+  labels:
+    app: prometheus
+spec:
+  # 至少保持 1 个 Prometheus 实例可用
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: prometheus
+
+---
+# ============================================================================
+# PDB 3: Loki - 保证日志收集可用
+# ============================================================================
+# 作用: 确保日志系统在维护期间保持可用
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: loki-pdb
+  labels:
+    app: loki
+spec:
+  # 至少保持 1 个 Loki 实例可用
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: loki
+
+---
+# ============================================================================
+# PDB 4: Grafana - 保证仪表盘可用
+# ============================================================================
+# 作用: 确保可视化仪表盘在维护期间保持可用
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: grafana-pdb
+  labels:
+    app: grafana
+spec:
+  # 使用 maxUnavailable 更适合单副本场景
+  # 当只有 1 个副本时，minAvailable: 1 会阻止任何中断
+  # maxUnavailable: 1 允许在有备份策略时进行中断
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: grafana

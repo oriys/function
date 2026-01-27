@@ -1,0 +1,188 @@
+# ============================================================================
+# Function 平台配置文件
+# ============================================================================
+# 文件说明: Function 无服务器函数计算平台的核心配置文件
+#
+# 此配置文件将通过 ConfigMap 挂载到 Gateway 容器中
+# 包含服务器配置、运行时配置、网络配置、资源池配置、调度器配置、
+# 存储配置、事件配置、日志配置和指标配置等
+# ============================================================================
+
+# ----------------------------------------
+# 服务器配置
+# ----------------------------------------
+server:
+  # HTTP API 服务端口 - 用于接收函数管理请求 (CRUD 操作)
+  http_port: 8080
+  # 函数调用端口 - 用于接收函数执行请求
+  invoke_port: 8081
+  # Prometheus 指标暴露端口 - 用于监控数据采集
+  metrics_port: 9090
+  # 优雅关闭超时时间 - 收到终止信号后等待请求处理完成的最长时间
+  shutdown_timeout: 30s
+
+# ----------------------------------------
+# 运行时配置
+# ----------------------------------------
+runtime:
+  # 运行时模式: firecracker (轻量级虚拟机)
+  # 可选值: firecracker, docker, containerd
+  # firecracker 提供更强的隔离性和安全性
+  mode: firecracker
+
+# ----------------------------------------
+# Firecracker 微虚拟机配置
+# ----------------------------------------
+firecracker:
+  # Firecracker 二进制文件路径
+  binary: /opt/firecracker/bin/firecracker
+  # 虚拟机内核镜像路径
+  kernel: /opt/firecracker/kernel/vmlinux
+  # 根文件系统目录 - 存放各运行时的 rootfs 镜像
+  rootfs_dir: /opt/firecracker/rootfs
+  # Unix 套接字目录 - 用于与 Firecracker API 通信
+  socket_dir: /opt/firecracker/sockets
+  # vsock 目录 - 用于虚拟机与宿主机之间的通信
+  vsock_dir: /opt/firecracker/vsock
+  # 快照目录 - 存放虚拟机快照以加速冷启动
+  snapshot_dir: /opt/firecracker/snapshots
+  # 日志目录 - 存放 Firecracker 虚拟机日志
+  log_dir: /opt/firecracker/logs
+  # 虚拟机启动超时时间
+  boot_timeout: 10s
+
+# ----------------------------------------
+# 网络配置
+# ----------------------------------------
+network:
+  # 网桥名称 - 用于虚拟机网络连接
+  bridge_name: fcbr0
+  # 网桥 IP 地址 - 作为虚拟机的默认网关
+  bridge_ip: 172.20.0.1
+  # 虚拟机子网 CIDR - 虚拟机 IP 分配范围
+  subnet_cidr: 172.20.0.0/16
+  # CNI 配置目录
+  cni_config_dir: /etc/cni/net.d
+  # CNI 插件目录
+  cni_bin_dir: /opt/cni/bin
+  # 是否启用 NAT - 允许虚拟机访问外部网络
+  use_nat: true
+  # 外部网络接口 - 用于 NAT 转发
+  external_interface: eth0
+
+# ----------------------------------------
+# 虚拟机池配置
+# ----------------------------------------
+pool:
+  # 健康检查间隔 - 检查虚拟机健康状态的频率
+  health_check_interval: 10s
+  # 扩缩容检查间隔 - 检查是否需要调整虚拟机数量的频率
+  scale_check_interval: 30s
+  # 虚拟机最大存活时间 - 超过此时间的虚拟机将被回收
+  max_vm_age: 1h
+  # 单个虚拟机最大调用次数 - 超过后回收以防止资源泄漏
+  max_invocations: 1000
+  # 是否使用快照 - 启用后可加速虚拟机启动
+  use_snapshots: false
+  # 快照预热数量 - 预先创建的快照数量
+  snapshot_warmup: 0
+
+  # ----------------------------------------
+  # 各运行时的池配置
+  # ----------------------------------------
+  runtimes:
+    # Python 3.11 运行时配置
+    - runtime: python3.11
+      min_warm: 1           # 最小预热虚拟机数量 - 保证至少有 1 个空闲虚拟机
+      max_total: 10         # 最大虚拟机总数 - 限制资源使用上限
+      target_warm: 2        # 目标预热数量 - 期望保持的空闲虚拟机数量
+      scale_up_factor: 0.8  # 扩容阈值 - 当使用率超过 80% 时触发扩容
+      scale_down_factor: 0.3 # 缩容阈值 - 当使用率低于 30% 时触发缩容
+      memory_mb: 256        # 单个虚拟机内存大小 (MB)
+      vcpus: 1              # 单个虚拟机 CPU 核心数
+
+    # Node.js 20 运行时配置
+    - runtime: nodejs20
+      min_warm: 1
+      max_total: 10
+      target_warm: 2
+      scale_up_factor: 0.8
+      scale_down_factor: 0.3
+      memory_mb: 256
+      vcpus: 1
+
+    # Go 1.24 运行时配置
+    - runtime: go1.24
+      min_warm: 1
+      max_total: 5          # Go 启动快，不需要太多预热实例
+      target_warm: 1
+      scale_up_factor: 0.8
+      scale_down_factor: 0.3
+      memory_mb: 128        # Go 程序内存占用较小
+      vcpus: 1
+
+    # WebAssembly 运行时配置
+    - runtime: wasm
+      min_warm: 1
+      max_total: 10
+      target_warm: 2
+      scale_up_factor: 0.8
+      scale_down_factor: 0.3
+      memory_mb: 64         # WASM 内存占用最小
+      vcpus: 1
+
+# ----------------------------------------
+# 调度器配置
+# ----------------------------------------
+scheduler:
+  # 工作协程数量 - 并行处理函数调用的协程数
+  workers: 10
+  # 队列大小 - 等待处理的请求队列长度
+  queue_size: 1000
+  # 默认函数执行超时时间
+  default_timeout: 30s
+  # 最大重试次数 - 函数执行失败后的重试次数
+  max_retries: 3
+
+# ----------------------------------------
+# 存储配置
+# ----------------------------------------
+storage:
+  # PostgreSQL 数据库配置 - 存储函数元数据、执行记录等
+  postgres:
+    host: postgres          # 数据库主机名 (K8s Service 名称)
+    port: 5432              # 数据库端口
+    database: nimbus      # 数据库名称
+    user: nimbus          # 数据库用户名
+    password: function      # 数据库密码 (生产环境应使用 Secret)
+    max_connections: 25     # 最大连接数
+
+  # Redis 配置 - 用于缓存、分布式锁、会话存储等
+  redis:
+    address: redis:6379     # Redis 地址 (K8s Service 名称:端口)
+    db: 0                   # 使用的 Redis 数据库编号
+
+# ----------------------------------------
+# 事件配置
+# ----------------------------------------
+events:
+  # NATS 消息队列地址 - 用于异步事件处理和函数触发
+  nats_url: nats://nats:4222
+
+# ----------------------------------------
+# 日志配置
+# ----------------------------------------
+logging:
+  # 日志级别: debug, info, warn, error
+  level: info
+  # 日志格式: json (结构化日志，便于日志聚合和分析)
+  format: json
+
+# ----------------------------------------
+# 指标配置
+# ----------------------------------------
+metrics:
+  # 是否启用 Prometheus 指标
+  enabled: true
+  # 指标命名空间前缀 - 所有指标名称将以此为前缀
+  namespace: nimbus

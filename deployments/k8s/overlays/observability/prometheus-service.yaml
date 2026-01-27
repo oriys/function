@@ -1,0 +1,16 @@
+# ============================================================================
+# observability: Prometheus Service
+# ============================================================================
+# 文件说明: Prometheus 的集群内访问入口（ClusterIP）。
+# ============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+spec:
+  selector:
+    app: prometheus
+  ports:
+    - name: http
+      port: 9090
+      targetPort: http

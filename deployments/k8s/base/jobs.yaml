@@ -1,0 +1,592 @@
+# ============================================================================
+# Job 和 CronJob 配置文件
+# ============================================================================
+# 文件说明: 定义一次性任务 (Job) 和定时任务 (CronJob)
+#
+# Job 的特点:
+# - 运行一次性任务，任务完成后 Pod 不会重启
+# - 保证任务至少成功完成指定次数
+# - 支持并行执行多个 Pod
+# - 支持失败重试
+#
+# CronJob 的特点:
+# - 按照 Cron 表达式定时创建 Job
+# - 适合定期执行的任务 (备份、清理、报告等)
+# - 可以配置并发策略和历史保留
+#
+# 面试常问:
+# 1. Job 和 Deployment 的区别? (一次性 vs 持续运行)
+# 2. Job 的 completions 和 parallelism 的区别?
+# 3. CronJob 的 concurrencyPolicy 有哪些选项?
+# 4. Job 失败了怎么办? (backoffLimit 重试)
+# 5. 如何查看 Job 的执行历史? (kubectl get jobs, kubectl logs)
+# ============================================================================
+
+---
+# ============================================================================
+# Job 1: 数据库迁移任务
+# ============================================================================
+# 作用: 在部署新版本时运行数据库迁移
+apiVersion: batch/v1
+kind: Job
+metadata:
+  # Job 名称 - 通常包含版本号或时间戳
+  name: db-migration-v1
+  labels:
+    app: nimbus
+    component: migration
+spec:
+  # ----------------------------------------
+  # 完成策略
+  # ----------------------------------------
+  # completions: 需要成功完成的 Pod 数量
+  completions: 1
+  # parallelism: 同时运行的 Pod 数量
+  parallelism: 1
+
+  # ----------------------------------------
+  # 失败重试
+  # ----------------------------------------
+  # backoffLimit: 失败重试次数 (默认 6)
+  backoffLimit: 3
+
+  # ----------------------------------------
+  # 超时设置
+  # ----------------------------------------
+  # activeDeadlineSeconds: Job 的最大运行时间
+  # 超时后会终止所有 Pod
+  activeDeadlineSeconds: 600  # 10 分钟
+
+  # ----------------------------------------
+  # TTL 控制器 (自动清理已完成的 Job)
+  # ----------------------------------------
+  # ttlSecondsAfterFinished: Job 完成后多久自动删除
+  ttlSecondsAfterFinished: 3600  # 1 小时后自动删除
+
+  # ----------------------------------------
+  # Pod 模板
+  # ----------------------------------------
+  template:
+    metadata:
+      labels:
+        app: nimbus
+        component: migration
+    spec:
+      # 重启策略 - Job 必须使用 Never 或 OnFailure
+      # Never: Pod 失败后不重启，Job 会创建新 Pod
+      # OnFailure: 容器失败后在同一 Pod 内重启
+      restartPolicy: Never
+
+      # 服务账号
+      serviceAccountName: default
+
+      containers:
+        - name: migrate
+          image: ghcr.io/oriys/function:latest
+          imagePullPolicy: Always
+
+          # 运行迁移命令
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Starting database migration..."
+              echo "Running migrations from $MIGRATION_DIR"
+              # 实际的迁移命令
+              # ./migrate -path $MIGRATION_DIR -database $DATABASE_URL up
+              echo "Migration completed successfully!"
+
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: url
+                  optional: true
+            - name: MIGRATION_DIR
+              value: /app/migrations
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+
+          volumeMounts:
+            - name: migrations
+              mountPath: /app/migrations
+              readOnly: true
+
+      volumes:
+        - name: migrations
+          configMap:
+            name: db-migrations
+            optional: true
+
+---
+# ============================================================================
+# Job 2: 一次性数据导入任务
+# ============================================================================
+# 作用: 批量导入初始数据
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: data-import
+  labels:
+    app: nimbus
+    component: import
+spec:
+  # 需要处理 3 个数据分片
+  completions: 3
+  # 同时处理 3 个
+  parallelism: 3
+
+  # 完成模式
+  # NonIndexed (默认): Pod 之间没有区别
+  # Indexed: 每个 Pod 有唯一索引 (0, 1, 2...)，通过 JOB_COMPLETION_INDEX 环境变量获取
+  completionMode: Indexed
+
+  backoffLimit: 2
+  activeDeadlineSeconds: 1800  # 30 分钟
+  ttlSecondsAfterFinished: 7200
+
+  template:
+    metadata:
+      labels:
+        app: nimbus
+        component: import
+    spec:
+      restartPolicy: Never
+
+      containers:
+        - name: import
+          image: ghcr.io/oriys/function:latest
+
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Processing shard $JOB_COMPLETION_INDEX of 3"
+              echo "Importing data from shard-$JOB_COMPLETION_INDEX.json"
+              # 实际的导入逻辑
+              sleep 10
+              echo "Shard $JOB_COMPLETION_INDEX import completed!"
+
+          # JOB_COMPLETION_INDEX 环境变量由 K8s 自动注入
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+
+---
+# ============================================================================
+# CronJob 1: 数据库备份
+# ============================================================================
+# 作用: 每天凌晨 2 点备份数据库
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: db-backup
+  labels:
+    app: nimbus
+    component: backup
+spec:
+  # ----------------------------------------
+  # Cron 表达式
+  # ----------------------------------------
+  # 格式: 分 时 日 月 周
+  # 0 2 * * *: 每天凌晨 2:00
+  schedule: "0 2 * * *"
+
+  # ----------------------------------------
+  # 时区设置 (Kubernetes 1.27+)
+  # ----------------------------------------
+  # 默认使用 UTC 时区
+  # timeZone: "Asia/Shanghai"
+
+  # ----------------------------------------
+  # 并发策略
+  # ----------------------------------------
+  # Allow: 允许并发执行 (默认)
+  # Forbid: 禁止并发，如果上一个还在运行则跳过
+  # Replace: 停止当前运行的 Job，启动新的
+  concurrencyPolicy: Forbid
+
+  # ----------------------------------------
+  # 启动截止时间
+  # ----------------------------------------
+  # 如果因为某些原因错过了调度时间，在这个时间内仍然可以启动
+  startingDeadlineSeconds: 3600  # 1 小时
+
+  # ----------------------------------------
+  # 历史保留
+  # ----------------------------------------
+  # 保留最近 3 个成功的 Job
+  successfulJobsHistoryLimit: 3
+  # 保留最近 1 个失败的 Job
+  failedJobsHistoryLimit: 1
+
+  # ----------------------------------------
+  # 暂停调度
+  # ----------------------------------------
+  # 设置为 true 可以暂停 CronJob
+  suspend: false
+
+  # ----------------------------------------
+  # Job 模板
+  # ----------------------------------------
+  jobTemplate:
+    metadata:
+      labels:
+        app: nimbus
+        component: backup
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 3600  # 1 小时
+      ttlSecondsAfterFinished: 86400  # 24 小时
+
+      template:
+        metadata:
+          labels:
+            app: nimbus
+            component: backup
+        spec:
+          restartPolicy: OnFailure
+
+          containers:
+            - name: backup
+              image: postgres:16-alpine
+
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+                  BACKUP_FILE="/backup/nimbus-$(date +%Y%m%d-%H%M%S).sql.gz"
+                  echo "Starting backup to $BACKUP_FILE"
+
+                  pg_dump -h $POSTGRES_HOST -U $POSTGRES_USER -d $POSTGRES_DB | gzip > $BACKUP_FILE
+
+                  echo "Backup completed: $BACKUP_FILE"
+                  echo "Size: $(ls -lh $BACKUP_FILE | awk '{print $5}')"
+
+                  # 清理 7 天前的备份
+                  find /backup -name "*.sql.gz" -mtime +7 -delete
+                  echo "Old backups cleaned up"
+
+              env:
+                - name: POSTGRES_HOST
+                  value: postgres
+                - name: POSTGRES_DB
+                  value: function
+                - name: POSTGRES_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: postgres-credentials
+                      key: username
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: postgres-credentials
+                      key: password
+
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  cpu: 500m
+                  memory: 512Mi
+
+              volumeMounts:
+                - name: backup-storage
+                  mountPath: /backup
+
+          volumes:
+            - name: backup-storage
+              persistentVolumeClaim:
+                claimName: backup-pvc
+
+---
+# ============================================================================
+# CronJob 2: 日志清理
+# ============================================================================
+# 作用: 每周日凌晨 3 点清理过期日志
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: log-cleanup
+  labels:
+    app: nimbus
+    component: cleanup
+spec:
+  # 每周日凌晨 3:00
+  schedule: "0 3 * * 0"
+
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      ttlSecondsAfterFinished: 86400
+
+      template:
+        spec:
+          restartPolicy: OnFailure
+
+          containers:
+            - name: cleanup
+              image: busybox:1.36
+
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  echo "Starting log cleanup..."
+                  echo "Removing logs older than 30 days"
+
+                  # 清理各个目录的旧日志
+                  find /logs -name "*.log" -mtime +30 -delete 2>/dev/null || true
+                  find /logs -name "*.log.gz" -mtime +90 -delete 2>/dev/null || true
+
+                  echo "Cleanup completed at $(date)"
+
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 100m
+                  memory: 128Mi
+
+              volumeMounts:
+                - name: logs
+                  mountPath: /logs
+
+          volumes:
+            - name: logs
+              persistentVolumeClaim:
+                claimName: logs-pvc
+
+---
+# ============================================================================
+# CronJob 3: 健康检查报告
+# ============================================================================
+# 作用: 每 6 小时生成系统健康报告
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: health-report
+  labels:
+    app: nimbus
+    component: monitoring
+spec:
+  # 每 6 小时: 0:00, 6:00, 12:00, 18:00
+  schedule: "0 */6 * * *"
+
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 4  # 保留最近 1 天的报告
+  failedJobsHistoryLimit: 2
+
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 300  # 5 分钟
+      ttlSecondsAfterFinished: 43200  # 12 小时
+
+      template:
+        spec:
+          restartPolicy: OnFailure
+          serviceAccountName: health-reporter
+
+          containers:
+            - name: reporter
+              image: bitnami/kubectl:latest
+
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  echo "======================================"
+                  echo "Health Report - $(date)"
+                  echo "======================================"
+
+                  echo ""
+                  echo "=== Namespace Summary ==="
+                  kubectl get pods -n nimbus -o wide
+
+                  echo ""
+                  echo "=== Pod Status ==="
+                  kubectl get pods -n nimbus -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.phase}{"\t"}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}'
+
+                  echo ""
+                  echo "=== Resource Usage ==="
+                  kubectl top pods -n nimbus 2>/dev/null || echo "Metrics server not available"
+
+                  echo ""
+                  echo "=== Recent Events ==="
+                  kubectl get events -n nimbus --sort-by='.lastTimestamp' | tail -20
+
+                  echo ""
+                  echo "=== PVC Status ==="
+                  kubectl get pvc -n nimbus
+
+                  echo ""
+                  echo "======================================"
+                  echo "Report completed at $(date)"
+                  echo "======================================"
+
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 200m
+                  memory: 128Mi
+
+---
+# ============================================================================
+# CronJob 4: Redis 缓存预热
+# ============================================================================
+# 作用: 每天凌晨 5 点预热常用缓存
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cache-warmup
+  labels:
+    app: nimbus
+    component: cache
+spec:
+  # 每天凌晨 5:00
+  schedule: "0 5 * * *"
+
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 600
+      ttlSecondsAfterFinished: 3600
+
+      template:
+        spec:
+          restartPolicy: OnFailure
+
+          containers:
+            - name: warmup
+              image: redis:7-alpine
+
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  echo "Starting cache warmup..."
+
+                  # 连接 Redis 并预热数据
+                  redis-cli -h $REDIS_HOST -a $REDIS_PASSWORD <<EOF
+                  # 预热常用配置
+                  SET config:rate_limit 1000 EX 86400
+                  SET config:timeout 30 EX 86400
+
+                  # 检查缓存状态
+                  INFO memory
+                  DBSIZE
+                  EOF
+
+                  echo "Cache warmup completed!"
+
+              env:
+                - name: REDIS_HOST
+                  value: redis
+                - name: REDIS_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: redis-credentials
+                      key: password
+
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 100m
+                  memory: 128Mi
+
+---
+# ============================================================================
+# ServiceAccount for Health Reporter
+# ============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: health-reporter
+  labels:
+    app: nimbus
+    component: monitoring
+
+---
+# ============================================================================
+# Role for Health Reporter
+# ============================================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: health-reporter
+  labels:
+    app: nimbus
+    component: monitoring
+rules:
+  # 读取 Pod 信息
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "events", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch"]
+  # 读取 metrics
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+
+---
+# ============================================================================
+# RoleBinding for Health Reporter
+# ============================================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: health-reporter
+  labels:
+    app: nimbus
+    component: monitoring
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: health-reporter
+subjects:
+  - kind: ServiceAccount
+    name: health-reporter
+
+---
+# ============================================================================
+# Backup PVC (用于数据库备份)
+# ============================================================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: backup-pvc
+  labels:
+    app: nimbus
+    component: backup
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi

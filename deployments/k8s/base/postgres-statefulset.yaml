@@ -1,0 +1,467 @@
+# ============================================================================
+# PostgreSQL StatefulSet 配置文件
+# ============================================================================
+# 文件说明: 定义 PostgreSQL 数据库的有状态部署
+#
+# StatefulSet vs Deployment:
+# - StatefulSet: 有序部署/删除、稳定的网络标识、持久化存储
+# - Deployment: 无状态应用、Pod 可互换、无持久化保证
+#
+# StatefulSet 的特点:
+# - 稳定的网络标识: Pod 名称是 {name}-{ordinal}，如 postgres-0, postgres-1
+# - 稳定的持久化存储: 每个 Pod 有独立的 PVC，Pod 重建后会重新绑定
+# - 有序部署和扩展: Pod 按顺序创建/删除 (0, 1, 2...)
+# - 有序滚动更新: 从最大序号开始更新
+#
+# Headless Service:
+# - clusterIP: None 的 Service
+# - 不做负载均衡，直接返回 Pod IP
+# - DNS 记录: {pod-name}.{service-name}.{namespace}.svc.cluster.local
+# - 例如: postgres-0.postgres-headless.function.svc.cluster.local
+#
+# 面试常问:
+# 1. StatefulSet 和 Deployment 的区别? (稳定标识、有序操作、持久存储)
+# 2. 为什么数据库要用 StatefulSet? (数据持久化、主从复制需要稳定标识)
+# 3. Headless Service 的作用? (提供稳定的 DNS 名称，直接访问 Pod)
+# 4. volumeClaimTemplates 的作用? (为每个 Pod 自动创建 PVC)
+# 5. Pod Management Policy 的两种模式? (OrderedReady vs Parallel)
+# ============================================================================
+
+---
+# ============================================================================
+# Headless Service - 用于 StatefulSet 的服务发现
+# ============================================================================
+# 作用: 为 StatefulSet 的每个 Pod 提供稳定的 DNS 名称
+apiVersion: v1
+kind: Service
+metadata:
+  # Service 名称 - 与 StatefulSet 的 serviceName 对应
+  name: postgres-headless
+  labels:
+    app: postgres
+    component: database
+spec:
+  # ----------------------------------------
+  # Headless Service 配置
+  # ----------------------------------------
+  # clusterIP: None 表示这是一个 Headless Service
+  # 不分配 ClusterIP，DNS 查询直接返回 Pod IP
+  clusterIP: None
+  # 端口配置
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+  # Pod 选择器
+  selector:
+    app: postgres
+
+---
+# ============================================================================
+# 普通 Service - 用于客户端连接 (可选)
+# ============================================================================
+# 作用: 提供负载均衡的数据库访问入口 (通常用于只读副本)
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  labels:
+    app: postgres
+    component: database
+spec:
+  # 使用 ClusterIP (默认)
+  type: ClusterIP
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+  selector:
+    app: postgres
+
+---
+# ============================================================================
+# PostgreSQL StatefulSet
+# ============================================================================
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  # StatefulSet 名称
+  name: postgres
+  labels:
+    app: postgres
+    component: database
+spec:
+  # ----------------------------------------
+  # 服务名称 - 必须与 Headless Service 名称一致
+  # ----------------------------------------
+  # 用于生成 Pod 的 DNS 记录
+  serviceName: postgres-headless
+
+  # ----------------------------------------
+  # 副本数
+  # ----------------------------------------
+  # 单节点: 1
+  # 主从复制: 通常 1 主 + N 从
+  replicas: 1
+
+  # ----------------------------------------
+  # Pod 选择器
+  # ----------------------------------------
+  selector:
+    matchLabels:
+      app: postgres
+
+  # ----------------------------------------
+  # Pod 管理策略
+  # ----------------------------------------
+  # OrderedReady (默认): 有序创建/删除，等待前一个 Pod Ready
+  # Parallel: 并行创建/删除，不等待
+  podManagementPolicy: OrderedReady
+
+  # ----------------------------------------
+  # 更新策略
+  # ----------------------------------------
+  updateStrategy:
+    # RollingUpdate: 滚动更新 (默认)
+    # OnDelete: 只有手动删除 Pod 时才更新
+    type: RollingUpdate
+    rollingUpdate:
+      # partition: 只更新序号 >= partition 的 Pod
+      # 用于金丝雀发布: 先更新最后一个 Pod 验证
+      partition: 0
+
+  # ----------------------------------------
+  # Pod 模板
+  # ----------------------------------------
+  template:
+    metadata:
+      labels:
+        app: postgres
+      annotations:
+        # 用于监控的注解
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9187"
+    spec:
+      # 服务账号
+      serviceAccountName: default
+
+      # 安全上下文 - Pod 级别
+      securityContext:
+        # PostgreSQL 容器使用 postgres 用户 (UID 999)
+        fsGroup: 999
+
+      # ----------------------------------------
+      # Init Container - 初始化数据目录权限
+      # ----------------------------------------
+      initContainers:
+        - name: init-permissions
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              # 确保数据目录存在且权限正确
+              chown -R 999:999 /var/lib/postgresql/data
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+          securityContext:
+            runAsUser: 0  # 以 root 运行初始化
+
+      # ----------------------------------------
+      # 主容器
+      # ----------------------------------------
+      containers:
+        - name: postgres
+          # 镜像 - 使用官方 PostgreSQL 镜像
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+
+          # 端口
+          ports:
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+
+          # ----------------------------------------
+          # 环境变量
+          # ----------------------------------------
+          env:
+            # 数据库名称
+            - name: POSTGRES_DB
+              value: function
+            # 用户名
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: username
+                  optional: true
+            # 密码 - 从 Secret 获取
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: password
+                  optional: true
+            # 数据目录
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+
+          # ----------------------------------------
+          # 资源限制
+          # ----------------------------------------
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+
+          # ----------------------------------------
+          # 存储挂载
+          # ----------------------------------------
+          volumeMounts:
+            # 数据目录 - 使用 PVC
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+            # 配置文件 (可选)
+            - name: postgres-config
+              mountPath: /etc/postgresql/postgresql.conf
+              subPath: postgresql.conf
+              readOnly: true
+            # 初始化脚本 (可选)
+            - name: init-scripts
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+
+          # ----------------------------------------
+          # 健康检查
+          # ----------------------------------------
+          # 存活探针 - 检查进程是否存活
+          livenessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - $(POSTGRES_USER)
+                - -d
+                - $(POSTGRES_DB)
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+
+          # 就绪探针 - 检查是否可以接受流量
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - $(POSTGRES_USER)
+                - -d
+                - $(POSTGRES_DB)
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          # 启动探针 - 用于慢启动的应用
+          startupProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - $(POSTGRES_USER)
+                - -d
+                - $(POSTGRES_DB)
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30  # 最多等待 5 分钟
+
+          # 安全上下文 - 容器级别
+          securityContext:
+            runAsUser: 999
+            runAsGroup: 999
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false  # PostgreSQL 需要写入
+
+      # ----------------------------------------
+      # 卷定义 (非持久化卷)
+      # ----------------------------------------
+      volumes:
+        # 配置文件 - 从 ConfigMap 加载
+        - name: postgres-config
+          configMap:
+            name: postgres-config
+            optional: true
+        # 初始化脚本
+        - name: init-scripts
+          configMap:
+            name: postgres-init-scripts
+            optional: true
+
+      # ----------------------------------------
+      # 调度约束
+      # ----------------------------------------
+      # 节点亲和性 - 优先调度到有 SSD 的节点
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: node.kubernetes.io/instance-type
+                    operator: In
+                    values:
+                      - db-optimized
+
+      # 容忍污点
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: database
+          effect: NoSchedule
+
+  # ----------------------------------------
+  # Volume Claim Templates - 为每个 Pod 创建 PVC
+  # ----------------------------------------
+  # 这是 StatefulSet 的核心特性
+  # 每个 Pod 会自动创建名为 {volumeClaimTemplate.name}-{pod-name} 的 PVC
+  # 例如: postgres-data-postgres-0
+  volumeClaimTemplates:
+    - metadata:
+        name: postgres-data
+        labels:
+          app: postgres
+      spec:
+        # 访问模式
+        # ReadWriteOnce: 单节点读写
+        # ReadWriteMany: 多节点读写 (需要支持的存储类)
+        accessModes:
+          - ReadWriteOnce
+        # 存储类 - 使用默认存储类或指定
+        # storageClassName: fast-ssd
+        # 存储大小
+        resources:
+          requests:
+            storage: 10Gi
+
+---
+# ============================================================================
+# PostgreSQL ConfigMap - 自定义配置 (可选)
+# ============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-config
+  labels:
+    app: postgres
+data:
+  postgresql.conf: |
+    # ============================================
+    # PostgreSQL 配置文件
+    # ============================================
+
+    # 连接设置
+    listen_addresses = '*'
+    port = 5432
+    max_connections = 100
+
+    # 内存设置
+    shared_buffers = 256MB
+    effective_cache_size = 768MB
+    work_mem = 4MB
+    maintenance_work_mem = 64MB
+
+    # WAL 设置
+    wal_level = replica
+    max_wal_senders = 3
+    wal_keep_size = 64MB
+
+    # 日志设置
+    logging_collector = on
+    log_directory = 'pg_log'
+    log_filename = 'postgresql-%Y-%m-%d_%H%M%S.log'
+    log_statement = 'ddl'
+    log_min_duration_statement = 1000  # 记录超过 1 秒的查询
+
+    # 性能设置
+    random_page_cost = 1.1  # SSD 优化
+    effective_io_concurrency = 200
+
+---
+# ============================================================================
+# PostgreSQL Secret - 凭证 (示例，生产环境应使用外部 Secret 管理)
+# ============================================================================
+# 注意: 生产环境应使用:
+# - Kubernetes External Secrets
+# - Vault
+# - Sealed Secrets
+# - SOPS
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-credentials
+  labels:
+    app: postgres
+type: Opaque
+stringData:
+  # 警告: 仅用于示例，生产环境请使用强密码
+  username: postgres
+  password: changeme-in-production
+
+---
+# ============================================================================
+# PostgreSQL Init Scripts ConfigMap (可选)
+# ============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init-scripts
+  labels:
+    app: postgres
+data:
+  # 初始化脚本会在数据库首次启动时执行
+  01-init-schema.sql: |
+    -- 创建 function 平台所需的表
+    CREATE TABLE IF NOT EXISTS functions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        name VARCHAR(255) NOT NULL,
+        runtime VARCHAR(50) NOT NULL,
+        code TEXT NOT NULL,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS invocations (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        function_id UUID REFERENCES functions(id),
+        status VARCHAR(50) NOT NULL,
+        input JSONB,
+        output JSONB,
+        duration_ms INTEGER,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );
+
+    -- 创建索引
+    CREATE INDEX idx_functions_name ON functions(name);
+    CREATE INDEX idx_invocations_function_id ON invocations(function_id);
+    CREATE INDEX idx_invocations_created_at ON invocations(created_at);
+
+  02-init-user.sql: |
+    -- 创建应用用户 (最小权限原则)
+    DO $$
+    BEGIN
+        IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'function_app') THEN
+            CREATE ROLE function_app WITH LOGIN PASSWORD 'app-password';
+        END IF;
+    END
+    $$;
+
+    GRANT CONNECT ON DATABASE function TO function_app;
+    GRANT USAGE ON SCHEMA public TO function_app;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO function_app;
+    GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO function_app;

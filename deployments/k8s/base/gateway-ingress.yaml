@@ -1,0 +1,126 @@
+# ============================================================================
+# Gateway Ingress 配置文件
+# ============================================================================
+# 文件说明: 定义 Nimbus Gateway 的 Ingress 资源，将服务暴露到集群外部
+#
+# Ingress 的作用:
+# - 将集群内服务暴露到外部，提供 HTTP/HTTPS 路由
+# - 支持基于域名和路径的路由规则
+# - 支持 TLS 终止 (HTTPS)
+# - 支持负载均衡、重写规则、限流等
+#
+# 前提条件:
+# - 需要安装 Ingress Controller (如 nginx-ingress, traefik, istio 等)
+# - TLS 配置需要创建包含证书的 Secret
+#
+# 面试常问:
+# 1. Ingress 和 Service 的区别? (L7 vs L4)
+# 2. Ingress Controller 的作用?
+# 3. 如何配置 TLS?
+# 4. 如何实现金丝雀发布?
+# ============================================================================
+
+# API 版本: networking.k8s.io 组 v1 版本
+apiVersion: networking.k8s.io/v1
+# 资源类型: Ingress (入口)
+kind: Ingress
+# 元数据
+metadata:
+  # Ingress 名称
+  name: nimbus-gateway
+  # 标签
+  labels:
+    app: nimbus-gateway
+  # 注解 - 用于配置 Ingress Controller 的特定行为
+  annotations:
+    # ----------------------------------------
+    # Nginx Ingress Controller 注解
+    # ----------------------------------------
+    # 请求体大小限制 - 允许上传最大 10MB 的函数代码
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    # 读取超时 - 等待后端响应的最长时间 (秒)
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    # 发送超时 - 向后端发送请求的最长时间 (秒)
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+
+    # ----------------------------------------
+    # CORS (跨域资源共享) 配置
+    # ----------------------------------------
+    # 启用 CORS - 允许跨域请求
+    nginx.ingress.kubernetes.io/enable-cors: "true"
+    # 允许的 HTTP 方法
+    nginx.ingress.kubernetes.io/cors-allow-methods: "GET, POST, PUT, DELETE, OPTIONS"
+    # 允许的请求头
+    nginx.ingress.kubernetes.io/cors-allow-headers: "Content-Type, Authorization, X-API-Key"
+
+    # ----------------------------------------
+    # 限流配置 (防止 DDoS 攻击)
+    # ----------------------------------------
+    # 每秒请求数限制
+    nginx.ingress.kubernetes.io/limit-rps: "100"
+    # 最大并发连接数限制
+    nginx.ingress.kubernetes.io/limit-connections: "50"
+# Ingress 规格
+spec:
+  # 指定 Ingress Controller 类型
+  # 集群中可能有多个 Ingress Controller，通过此字段指定使用哪个
+  ingressClassName: nginx
+
+  # ----------------------------------------
+  # TLS 配置 (HTTPS)
+  # ----------------------------------------
+  tls:
+    # TLS 证书配置
+    - hosts:
+        # 主域名
+        - nimbus.example.com
+        # API 子域名
+        - api.nimbus.example.com
+      # 包含 TLS 证书和私钥的 Secret 名称
+      # Secret 需要包含 tls.crt 和 tls.key
+      secretName: nimbus-tls
+
+  # ----------------------------------------
+  # 路由规则
+  # ----------------------------------------
+  rules:
+    # 规则 1: 主域名 - API 服务
+    - host: nimbus.example.com
+      http:
+        paths:
+          # 路径 1: API 路径前缀
+          - path: /api
+            # 路径匹配类型:
+            # - Prefix: 前缀匹配
+            # - Exact: 精确匹配
+            # - ImplementationSpecific: 由 Ingress Controller 决定
+            pathType: Prefix
+            # 后端服务配置
+            backend:
+              service:
+                # 目标 Service 名称
+                name: nimbus-gateway
+                port:
+                  # 目标端口 (使用命名端口)
+                  name: http
+          # 路径 2: 健康检查端点
+          - path: /health
+            pathType: Exact    # 精确匹配
+            backend:
+              service:
+                name: nimbus-gateway
+                port:
+                  name: http
+
+    # 规则 2: API 子域名 - 所有请求路由到 Gateway
+    - host: api.nimbus.example.com
+      http:
+        paths:
+          # 根路径 - 匹配所有请求
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: nimbus-gateway
+                port:
+                  name: http

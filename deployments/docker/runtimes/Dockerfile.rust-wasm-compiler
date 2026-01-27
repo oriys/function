@@ -1,0 +1,9 @@
+# Rust WASM Compiler Image
+# Pre-installs wasm32-unknown-unknown target for faster compilation
+
+FROM rust:1.75-slim
+
+# Install the wasm32 target
+RUN rustup target add wasm32-unknown-unknown
+
+WORKDIR /work

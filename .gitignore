@@ -1,0 +1,62 @@
+# Binaries
+bin/
+gateway
+nimbus
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.wasm
+
+# Test binary
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage.html
+
+# Dependency directories
+vendor/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+/opt/firecracker/logs/
+
+# Firecracker runtime
+/opt/firecracker/sockets/
+/opt/firecracker/vsock/
+/opt/firecracker/snapshots/
+
+# Local config overrides
+configs/config.local.yaml
+
+# Build artifacts
+dist/
+build/
+site/
+.docusaurus/
+.playwright-mcp/
+*.tsbuildinfo
+
+# Docker volumes (if using local paths)
+.docker-data/
+
+# Node
+node_modules/
+
+# Python
+__pycache__/
+*.pyc

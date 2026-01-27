@@ -1,0 +1,148 @@
+# ============================================================================
+# Gateway Deployment 配置文件
+# ============================================================================
+# 文件说明: 定义 Nimbus Gateway 的 Deployment 资源
+#
+# Deployment 的作用:
+# - 声明式地管理 Pod 的副本数量
+# - 支持滚动更新和回滚
+# - 自动替换失败的 Pod
+# - 管理 ReplicaSet
+#
+# Nimbus Gateway 是整个平台的入口，负责:
+# - 接收和路由函数调用请求
+# - 管理 Firecracker 虚拟机池
+# - 暴露 HTTP API 和监控指标
+# ============================================================================
+
+# API 版本: apps 组 v1 版本
+apiVersion: apps/v1
+# 资源类型: Deployment (部署)
+kind: Deployment
+# 元数据
+metadata:
+  # Deployment 名称
+  name: nimbus-gateway
+  # 标签 - 用于资源分类和选择
+  labels:
+    # 应用标识标签
+    app: nimbus-gateway
+# Deployment 规格
+spec:
+  # 副本数量 - 运行的 Pod 实例数
+  # 注意: 此值会被 HPA 覆盖，HPA 会根据负载自动调整副本数
+  replicas: 1
+  # Pod 选择器 - 用于识别由此 Deployment 管理的 Pod
+  selector:
+    # 标签匹配
+    matchLabels:
+      app: nimbus-gateway
+  # Pod 模板 - 定义 Pod 的规格
+  template:
+    # Pod 元数据
+    metadata:
+      # Pod 标签 - 必须与 selector 匹配
+      labels:
+        app: nimbus-gateway
+    # Pod 规格
+    spec:
+      # 容器列表
+      containers:
+        # Gateway 主容器
+        - name: gateway
+          # 容器镜像
+          image: ghcr.io/oriys/nimbus:latest
+          # 镜像拉取策略:
+          # - Always: 每次都拉取
+          # - IfNotPresent: 本地不存在时才拉取
+          # - Never: 从不拉取
+          imagePullPolicy: IfNotPresent
+          # 容器端口
+          ports:
+            # HTTP API 端口 - 用于接收函数调用和管理请求
+            - name: http
+              containerPort: 8080
+            # Prometheus 指标端口 - 用于监控数据采集
+            - name: metrics
+              containerPort: 9090
+          # 资源配置 - 定义容器的 CPU 和内存需求
+          resources:
+            # 资源请求 - 调度时保证的最小资源量
+            requests:
+              cpu: 500m          # 500 毫核 = 0.5 核 CPU
+              memory: 512Mi      # 512 MiB 内存
+            # 资源限制 - 容器可使用的最大资源量
+            limits:
+              cpu: "2"           # 最多 2 核 CPU
+              memory: 2Gi        # 最多 2 GiB 内存
+          # 安全上下文
+          securityContext:
+            # 特权模式 - Firecracker 需要访问 /dev/kvm 和网络设备
+            # 警告: 特权模式有安全风险，生产环境应考虑使用更细粒度的权限
+            privileged: true
+          # 卷挂载
+          volumeMounts:
+            # 配置文件挂载 - 将 ConfigMap 挂载为配置文件
+            - name: config
+              mountPath: /etc/nimbus/config.yaml
+              subPath: config.yaml
+            # KVM 设备挂载 - Firecracker 需要 KVM 进行硬件虚拟化
+            - name: kvm
+              mountPath: /dev/kvm
+            # TUN 设备挂载 - 用于虚拟机网络
+            - name: tun
+              mountPath: /dev/net/tun
+            # Unix 套接字目录 - Firecracker API 通信
+            - name: sockets
+              mountPath: /opt/firecracker/sockets
+            # vsock 目录 - 虚拟机与宿主机通信
+            - name: vsock
+              mountPath: /opt/firecracker/vsock
+            # 快照目录 - 存放虚拟机快照
+            - name: snapshots
+              mountPath: /opt/firecracker/snapshots
+            # 日志目录 - Firecracker 日志
+            - name: logs
+              mountPath: /opt/firecracker/logs
+          # 就绪探针 - 判断 Pod 是否准备好接收流量
+          readinessProbe:
+            httpGet:
+              path: /health      # 健康检查端点
+              port: http         # 使用命名端口
+            initialDelaySeconds: 5   # 容器启动后等待 5 秒开始检查
+            periodSeconds: 5         # 每 5 秒检查一次
+          # 存活探针 - 判断 Pod 是否存活，失败则重启容器
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10  # 容器启动后等待 10 秒开始检查
+            periodSeconds: 10        # 每 10 秒检查一次
+      # 卷定义
+      volumes:
+        # 配置卷 - 从 ConfigMap 创建
+        - name: config
+          configMap:
+            name: nimbus-config      # ConfigMap 名称
+        # KVM 设备卷 - 宿主机字符设备
+        - name: kvm
+          hostPath:
+            path: /dev/kvm           # 宿主机路径
+            type: CharDevice         # 字符设备类型
+        # TUN 设备卷 - 宿主机字符设备
+        - name: tun
+          hostPath:
+            path: /dev/net/tun
+            type: CharDevice
+        # 临时目录卷 - 用于 Unix 套接字
+        - name: sockets
+          emptyDir: {}               # 空目录，Pod 删除时数据丢失
+        # 临时目录卷 - 用于 vsock
+        - name: vsock
+          emptyDir: {}
+        # 临时目录卷 - 用于快照
+        - name: snapshots
+          emptyDir: {}
+        # 临时目录卷 - 用于日志
+        - name: logs
+          emptyDir: {}

@@ -1,0 +1,16 @@
+FROM golang:1.24-alpine AS builder
+
+WORKDIR /app
+
+COPY runtime-go.go /app/runtime.go
+RUN go build -tags docker_runtime_go -o runtime runtime.go
+
+FROM alpine:3.19
+
+RUN adduser -D func || true
+
+COPY --from=builder /app/runtime /app/runtime
+
+USER func
+
+ENTRYPOINT ["/app/runtime"]

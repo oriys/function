@@ -1,0 +1,54 @@
+# ============================================================================
+# dev-docker: NATS JetStream（演示用）
+# ============================================================================
+# 文件说明: 为 dev-docker overlay 提供 NATS（开启 JetStream，数据目录使用 emptyDir，Pod 重建会丢数据）。
+# ============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: nats
+  labels:
+    app: nats
+spec:
+  selector:
+    app: nats
+  ports:
+    - name: nats
+      port: 4222
+      targetPort: nats
+    - name: http
+      port: 8222
+      targetPort: http
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nats
+  labels:
+    app: nats
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nats
+  template:
+    metadata:
+      labels:
+        app: nats
+    spec:
+      containers:
+        - name: nats
+          image: nats:2.10-alpine
+          args: ["-js", "-sd", "/data"]
+          ports:
+            - name: nats
+              containerPort: 4222
+            - name: http
+              containerPort: 8222
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          emptyDir: {}

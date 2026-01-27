@@ -1,0 +1,474 @@
+# ============================================================================
+# Redis StatefulSet 配置文件
+# ============================================================================
+# 文件说明: 定义 Redis 缓存/消息队列的有状态部署
+#
+# Redis 部署模式:
+# - Standalone: 单节点，最简单，无高可用
+# - Sentinel: 哨兵模式，自动故障转移
+# - Cluster: 分布式集群，数据分片
+#
+# 本配置使用 Standalone 模式，适合开发和小规模生产
+# 生产环境建议使用 Redis Operator 或托管服务
+#
+# Redis 持久化模式:
+# - RDB: 快照，定期保存数据到磁盘
+# - AOF: 追加日志，记录每个写操作
+# - RDB + AOF: 两者结合，推荐
+#
+# 面试常问:
+# 1. Redis 的持久化方式有哪些? (RDB vs AOF)
+# 2. Redis Sentinel 和 Cluster 的区别? (高可用 vs 分片)
+# 3. Redis 的淘汰策略有哪些? (noeviction, allkeys-lru, volatile-lru 等)
+# 4. 如何保证 Redis 的高可用? (Sentinel/Cluster + PDB + 多 AZ 部署)
+# 5. Redis 内存满了怎么办? (淘汰策略、扩容、分片)
+# ============================================================================
+
+---
+# ============================================================================
+# Headless Service - 用于 StatefulSet 的服务发现
+# ============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-headless
+  labels:
+    app: redis
+    component: cache
+spec:
+  clusterIP: None
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+  selector:
+    app: redis
+
+---
+# ============================================================================
+# 普通 Service - 用于客户端连接
+# ============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  labels:
+    app: redis
+    component: cache
+spec:
+  type: ClusterIP
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+    # Redis Exporter 端口 (用于 Prometheus 监控)
+    - name: metrics
+      port: 9121
+      targetPort: 9121
+  selector:
+    app: redis
+
+---
+# ============================================================================
+# Redis StatefulSet
+# ============================================================================
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  labels:
+    app: redis
+    component: cache
+spec:
+  # Headless Service 名称
+  serviceName: redis-headless
+
+  # 副本数 - Standalone 模式使用 1
+  replicas: 1
+
+  # Pod 选择器
+  selector:
+    matchLabels:
+      app: redis
+
+  # Pod 管理策略
+  podManagementPolicy: OrderedReady
+
+  # 更新策略
+  updateStrategy:
+    type: RollingUpdate
+
+  # ----------------------------------------
+  # Pod 模板
+  # ----------------------------------------
+  template:
+    metadata:
+      labels:
+        app: redis
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9121"
+    spec:
+      # 安全上下文
+      securityContext:
+        fsGroup: 1000
+
+      # ----------------------------------------
+      # Init Container - 系统参数调优
+      # ----------------------------------------
+      initContainers:
+        # Redis 需要调整一些系统参数以获得最佳性能
+        - name: init-sysctl
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              # 禁用 THP (Transparent Huge Pages)
+              # Redis 建议禁用，可以减少延迟抖动
+              echo never > /sys/kernel/mm/transparent_hugepage/enabled || true
+              echo never > /sys/kernel/mm/transparent_hugepage/defrag || true
+
+              # 设置 vm.overcommit_memory (需要特权)
+              # sysctl -w vm.overcommit_memory=1 || true
+
+              # 设置 net.core.somaxconn (需要特权)
+              # sysctl -w net.core.somaxconn=65535 || true
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: sys
+              mountPath: /sys
+
+      # ----------------------------------------
+      # 主容器
+      # ----------------------------------------
+      containers:
+        # Redis 主容器
+        - name: redis
+          image: redis:7-alpine
+          imagePullPolicy: IfNotPresent
+
+          # 启动命令 - 使用自定义配置
+          command:
+            - redis-server
+            - /etc/redis/redis.conf
+
+          ports:
+            - name: redis
+              containerPort: 6379
+              protocol: TCP
+
+          # ----------------------------------------
+          # 环境变量
+          # ----------------------------------------
+          env:
+            # Redis 密码 - 从 Secret 获取
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-credentials
+                  key: password
+                  optional: true
+
+          # ----------------------------------------
+          # 资源限制
+          # ----------------------------------------
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+
+          # ----------------------------------------
+          # 存储挂载
+          # ----------------------------------------
+          volumeMounts:
+            # 数据目录
+            - name: redis-data
+              mountPath: /data
+            # 配置文件
+            - name: redis-config
+              mountPath: /etc/redis
+              readOnly: true
+
+          # ----------------------------------------
+          # 健康检查
+          # ----------------------------------------
+          livenessProbe:
+            exec:
+              command:
+                - redis-cli
+                - ping
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+
+          readinessProbe:
+            exec:
+              command:
+                - redis-cli
+                - ping
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          # 安全上下文
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+
+        # ----------------------------------------
+        # Sidecar: Redis Exporter (Prometheus 监控)
+        # ----------------------------------------
+        - name: redis-exporter
+          image: oliver006/redis_exporter:v1.55.0-alpine
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: metrics
+              containerPort: 9121
+              protocol: TCP
+
+          env:
+            - name: REDIS_ADDR
+              value: "localhost:6379"
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-credentials
+                  key: password
+                  optional: true
+
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 9121
+            initialDelaySeconds: 10
+            periodSeconds: 10
+
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+
+      # ----------------------------------------
+      # 卷定义
+      # ----------------------------------------
+      volumes:
+        # 配置文件
+        - name: redis-config
+          configMap:
+            name: redis-config
+        # 系统目录 (用于调优)
+        - name: sys
+          hostPath:
+            path: /sys
+
+      # ----------------------------------------
+      # 调度约束
+      # ----------------------------------------
+      affinity:
+        # 优先调度到内存优化的节点
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: node.kubernetes.io/instance-type
+                    operator: In
+                    values:
+                      - memory-optimized
+
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: cache
+          effect: NoSchedule
+
+  # ----------------------------------------
+  # Volume Claim Templates
+  # ----------------------------------------
+  volumeClaimTemplates:
+    - metadata:
+        name: redis-data
+        labels:
+          app: redis
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 5Gi
+
+---
+# ============================================================================
+# Redis ConfigMap - 配置文件
+# ============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-config
+  labels:
+    app: redis
+data:
+  redis.conf: |
+    # ============================================
+    # Redis 配置文件
+    # ============================================
+
+    # ----------------------------------------
+    # 网络设置
+    # ----------------------------------------
+    bind 0.0.0.0
+    port 6379
+    protected-mode yes
+
+    # 密码认证 (使用环境变量)
+    # requirepass 通过命令行参数或环境变量设置
+
+    # TCP 设置
+    tcp-backlog 511
+    timeout 0
+    tcp-keepalive 300
+
+    # ----------------------------------------
+    # 通用设置
+    # ----------------------------------------
+    daemonize no
+    supervised no
+    pidfile /var/run/redis.pid
+    loglevel notice
+    logfile ""
+    databases 16
+
+    # ----------------------------------------
+    # 持久化设置 - RDB 快照
+    # ----------------------------------------
+    # 格式: save <seconds> <changes>
+    # 在 seconds 秒内有 changes 次变更则保存
+    save 900 1      # 15 分钟内有 1 次变更
+    save 300 10     # 5 分钟内有 10 次变更
+    save 60 10000   # 1 分钟内有 10000 次变更
+
+    stop-writes-on-bgsave-error yes
+    rdbcompression yes
+    rdbchecksum yes
+    dbfilename dump.rdb
+    dir /data
+
+    # ----------------------------------------
+    # 持久化设置 - AOF
+    # ----------------------------------------
+    appendonly yes
+    appendfilename "appendonly.aof"
+    # appendfsync 策略:
+    # - always: 每次写操作都 fsync，最安全但最慢
+    # - everysec: 每秒 fsync 一次，推荐
+    # - no: 不主动 fsync，由 OS 决定
+    appendfsync everysec
+    no-appendfsync-on-rewrite no
+    auto-aof-rewrite-percentage 100
+    auto-aof-rewrite-min-size 64mb
+    aof-load-truncated yes
+    aof-use-rdb-preamble yes
+
+    # ----------------------------------------
+    # 内存管理
+    # ----------------------------------------
+    # 最大内存限制 (根据 Pod 内存限制设置)
+    maxmemory 800mb
+
+    # 淘汰策略:
+    # - noeviction: 不淘汰，内存满时返回错误
+    # - allkeys-lru: 从所有 key 中淘汰最近最少使用的
+    # - volatile-lru: 从有过期时间的 key 中淘汰 LRU
+    # - allkeys-random: 从所有 key 中随机淘汰
+    # - volatile-random: 从有过期时间的 key 中随机淘汰
+    # - volatile-ttl: 淘汰 TTL 最短的 key
+    # - allkeys-lfu: 从所有 key 中淘汰最不常用的 (Redis 4.0+)
+    # - volatile-lfu: 从有过期时间的 key 中淘汰 LFU
+    maxmemory-policy allkeys-lru
+
+    # LRU 采样数量 (越大越精确，但越慢)
+    maxmemory-samples 5
+
+    # ----------------------------------------
+    # Lazy Free (异步删除)
+    # ----------------------------------------
+    # 在后台线程中删除大 key，避免阻塞主线程
+    lazyfree-lazy-eviction yes
+    lazyfree-lazy-expire yes
+    lazyfree-lazy-server-del yes
+    replica-lazy-flush yes
+
+    # ----------------------------------------
+    # 客户端设置
+    # ----------------------------------------
+    # 最大客户端连接数
+    maxclients 10000
+
+    # ----------------------------------------
+    # 慢查询日志
+    # ----------------------------------------
+    # 超过 10ms 的查询记录到慢查询日志
+    slowlog-log-slower-than 10000
+    # 保留最近 128 条慢查询
+    slowlog-max-len 128
+
+    # ----------------------------------------
+    # 安全设置
+    # ----------------------------------------
+    # 禁用危险命令 (生产环境推荐)
+    rename-command FLUSHDB ""
+    rename-command FLUSHALL ""
+    rename-command KEYS ""
+    rename-command DEBUG ""
+
+---
+# ============================================================================
+# Redis Secret - 凭证
+# ============================================================================
+apiVersion: v1
+kind: Secret
+metadata:
+  name: redis-credentials
+  labels:
+    app: redis
+type: Opaque
+stringData:
+  # 警告: 仅用于示例，生产环境请使用强密码
+  password: changeme-in-production
+
+---
+# ============================================================================
+# Redis PodDisruptionBudget
+# ============================================================================
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: redis-pdb
+  labels:
+    app: redis
+spec:
+  # 对于单副本，使用 maxUnavailable
+  # 这允许在有备份策略时进行维护
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: redis

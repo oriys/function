@@ -1,0 +1,13 @@
+FROM golang:1.24-alpine
+
+# Install delve debugger and required tools
+RUN apk add --no-cache git && \
+    go install github.com/go-delve/delve/cmd/dlv@latest
+
+# Create non-root user
+RUN adduser -D func || true
+
+WORKDIR /tmp
+
+# Default entrypoint - will be overridden by debug container
+ENTRYPOINT ["/go/bin/dlv"]

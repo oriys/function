@@ -1,0 +1,16 @@
+# ============================================================================
+# Grafana Provisioning：仪表盘提供者
+# ============================================================================
+# 文件说明: Grafana 启动时从指定目录加载 JSON 仪表盘文件。
+# ============================================================================
+apiVersion: 1
+
+providers:
+  - name: 'Function Platform'
+    orgId: 1
+    folder: ''
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /var/lib/grafana/dashboards

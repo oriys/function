@@ -1,0 +1,552 @@
+# ============================================================================
+# DaemonSet 配置文件
+# ============================================================================
+# 文件说明: 定义 DaemonSet，确保每个节点运行一个 Pod 副本
+#
+# DaemonSet 的作用:
+# - 确保每个节点 (或特定节点) 运行一个 Pod 副本
+# - 节点加入集群时自动部署 Pod
+# - 节点离开集群时自动清理 Pod
+#
+# 典型使用场景:
+# - 日志收集: Fluentd, Filebeat, Promtail
+# - 监控代理: Node Exporter, Datadog Agent
+# - 存储守护: GlusterFS, Ceph
+# - 网络插件: Calico, Flannel, Cilium
+# - 安全代理: Falco, Sysdig
+#
+# DaemonSet vs Deployment:
+# - DaemonSet: 每个节点一个 Pod，用于节点级服务
+# - Deployment: 指定副本数，用于应用服务
+#
+# 面试常问:
+# 1. DaemonSet 和 Deployment 的区别? (每节点一个 vs 指定副本数)
+# 2. 如何让 DaemonSet 只在特定节点运行? (nodeSelector, affinity)
+# 3. DaemonSet 如何更新? (RollingUpdate, OnDelete)
+# 4. DaemonSet Pod 如何访问宿主机资源? (hostPath, hostNetwork)
+# 5. DaemonSet 常见使用场景? (日志、监控、网络)
+# ============================================================================
+
+---
+# ============================================================================
+# DaemonSet 1: Node Exporter - 节点监控
+# ============================================================================
+# 作用: 在每个节点上运行 Prometheus Node Exporter，收集节点指标
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-exporter
+  labels:
+    app: node-exporter
+    component: monitoring
+spec:
+  # Pod 选择器
+  selector:
+    matchLabels:
+      app: node-exporter
+
+  # ----------------------------------------
+  # 更新策略
+  # ----------------------------------------
+  updateStrategy:
+    # RollingUpdate: 滚动更新 (默认)
+    # OnDelete: 只有手动删除 Pod 时才更新
+    type: RollingUpdate
+    rollingUpdate:
+      # maxUnavailable: 更新时最多不可用的 Pod 数量
+      # 可以是数字或百分比
+      maxUnavailable: 1
+
+  # ----------------------------------------
+  # Pod 模板
+  # ----------------------------------------
+  template:
+    metadata:
+      labels:
+        app: node-exporter
+      annotations:
+        # Prometheus 自动发现
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9100"
+    spec:
+      # ----------------------------------------
+      # 使用宿主机网络
+      # ----------------------------------------
+      # Node Exporter 需要访问宿主机的网络栈
+      hostNetwork: true
+      # 使用宿主机的 PID 命名空间 (用于收集进程信息)
+      hostPID: true
+
+      # 服务账号
+      serviceAccountName: node-exporter
+
+      # ----------------------------------------
+      # 调度约束
+      # ----------------------------------------
+      # 容忍所有污点，确保在所有节点上运行
+      tolerations:
+        # 容忍 master 节点的污点
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        # 容忍任何自定义污点
+        - operator: Exists
+
+      # ----------------------------------------
+      # 容器配置
+      # ----------------------------------------
+      containers:
+        - name: node-exporter
+          image: prom/node-exporter:v1.7.0
+          imagePullPolicy: IfNotPresent
+
+          # 启动参数
+          args:
+            - --path.procfs=/host/proc
+            - --path.sysfs=/host/sys
+            - --path.rootfs=/host/root
+            - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|var/lib/docker/.+)($|/)
+            - --collector.filesystem.fs-types-exclude=^(autofs|binfmt_misc|cgroup|configfs|debugfs|devpts|devtmpfs|fusectl|hugetlbfs|mqueue|overlay|proc|procfs|pstore|rpc_pipefs|securityfs|sysfs|tracefs)$
+
+          ports:
+            - name: metrics
+              containerPort: 9100
+              hostPort: 9100  # 映射到宿主机端口
+
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+
+          # ----------------------------------------
+          # 挂载宿主机目录 (只读)
+          # ----------------------------------------
+          volumeMounts:
+            - name: proc
+              mountPath: /host/proc
+              readOnly: true
+            - name: sys
+              mountPath: /host/sys
+              readOnly: true
+            - name: root
+              mountPath: /host/root
+              readOnly: true
+              mountPropagation: HostToContainer
+
+          # 安全上下文
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534  # nobody
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+
+      # ----------------------------------------
+      # 卷定义 - 挂载宿主机目录
+      # ----------------------------------------
+      volumes:
+        - name: proc
+          hostPath:
+            path: /proc
+        - name: sys
+          hostPath:
+            path: /sys
+        - name: root
+          hostPath:
+            path: /
+
+---
+# ============================================================================
+# DaemonSet 2: Fluent Bit - 日志收集
+# ============================================================================
+# 作用: 在每个节点上收集容器日志并转发到 Loki/Elasticsearch
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fluent-bit
+  labels:
+    app: fluent-bit
+    component: logging
+spec:
+  selector:
+    matchLabels:
+      app: fluent-bit
+
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+
+  template:
+    metadata:
+      labels:
+        app: fluent-bit
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "2020"
+        prometheus.io/path: "/api/v1/metrics/prometheus"
+    spec:
+      serviceAccountName: fluent-bit
+
+      # 容忍所有污点
+      tolerations:
+        - operator: Exists
+
+      # 优先级 - 确保日志收集器优先调度
+      priorityClassName: system-node-critical
+
+      containers:
+        - name: fluent-bit
+          image: fluent/fluent-bit:2.2
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: http
+              containerPort: 2020
+
+          # 环境变量
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+
+          volumeMounts:
+            # 容器日志目录
+            - name: varlog
+              mountPath: /var/log
+              readOnly: true
+            # Docker/containerd 日志
+            - name: containerlog
+              mountPath: /var/lib/docker/containers
+              readOnly: true
+            # Fluent Bit 配置
+            - name: config
+              mountPath: /fluent-bit/etc/
+
+          livenessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: 2020
+            initialDelaySeconds: 10
+            periodSeconds: 10
+
+          readinessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: 2020
+            initialDelaySeconds: 5
+            periodSeconds: 5
+
+      volumes:
+        - name: varlog
+          hostPath:
+            path: /var/log
+        - name: containerlog
+          hostPath:
+            path: /var/lib/docker/containers
+        - name: config
+          configMap:
+            name: fluent-bit-config
+
+      # 指定在特定节点运行 (可选)
+      # nodeSelector:
+      #   kubernetes.io/os: linux
+
+---
+# ============================================================================
+# DaemonSet 3: 网络诊断工具 (可选)
+# ============================================================================
+# 作用: 在每个节点上运行网络诊断工具，便于排查网络问题
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: network-tools
+  labels:
+    app: network-tools
+    component: diagnostics
+spec:
+  selector:
+    matchLabels:
+      app: network-tools
+
+  updateStrategy:
+    type: OnDelete  # 手动更新，避免影响诊断
+
+  template:
+    metadata:
+      labels:
+        app: network-tools
+    spec:
+      # 使用宿主机网络进行诊断
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+
+      # 只在需要时启用
+      # 默认不调度，通过节点选择器控制
+      nodeSelector:
+        network-tools: "enabled"
+
+      tolerations:
+        - operator: Exists
+
+      containers:
+        - name: tools
+          image: nicolaka/netshoot:latest
+          imagePullPolicy: IfNotPresent
+
+          # 保持容器运行
+          command:
+            - /bin/bash
+            - -c
+            - |
+              echo "Network tools running on $(hostname)"
+              echo "Available tools: curl, wget, ping, traceroute, nslookup, dig, tcpdump, netstat, iperf, etc."
+              # 保持容器运行
+              tail -f /dev/null
+
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+
+          securityContext:
+            # 网络诊断需要特权
+            privileged: true
+            capabilities:
+              add:
+                - NET_ADMIN
+                - SYS_PTRACE
+
+---
+# ============================================================================
+# DaemonSet 4: GPU 设备插件 (示例)
+# ============================================================================
+# 作用: 在有 GPU 的节点上运行 NVIDIA 设备插件
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nvidia-device-plugin
+  labels:
+    app: nvidia-device-plugin
+    component: gpu
+spec:
+  selector:
+    matchLabels:
+      app: nvidia-device-plugin
+
+  updateStrategy:
+    type: RollingUpdate
+
+  template:
+    metadata:
+      labels:
+        app: nvidia-device-plugin
+    spec:
+      # ----------------------------------------
+      # 只在有 GPU 的节点运行
+      # ----------------------------------------
+      nodeSelector:
+        # 需要节点有此标签
+        nvidia.com/gpu: "true"
+
+      # 容忍 GPU 节点的污点
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+
+      # 优先级
+      priorityClassName: system-node-critical
+
+      containers:
+        - name: nvidia-device-plugin
+          image: nvcr.io/nvidia/k8s-device-plugin:v0.14.3
+          imagePullPolicy: IfNotPresent
+
+          env:
+            - name: FAIL_ON_INIT_ERROR
+              value: "false"
+
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+
+          # 安全上下文 - 需要特权访问 GPU
+          securityContext:
+            privileged: true
+
+          volumeMounts:
+            - name: device-plugin
+              mountPath: /var/lib/kubelet/device-plugins
+
+      volumes:
+        - name: device-plugin
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
+
+---
+# ============================================================================
+# ServiceAccount for Node Exporter
+# ============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: node-exporter
+  labels:
+    app: node-exporter
+
+---
+# ============================================================================
+# ServiceAccount for Fluent Bit
+# ============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fluent-bit
+  labels:
+    app: fluent-bit
+
+---
+# ============================================================================
+# ClusterRole for Fluent Bit
+# ============================================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fluent-bit
+  labels:
+    app: fluent-bit
+rules:
+  - apiGroups: [""]
+    resources:
+      - namespaces
+      - pods
+      - pods/log
+    verbs: ["get", "list", "watch"]
+
+---
+# ============================================================================
+# ClusterRoleBinding for Fluent Bit
+# ============================================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fluent-bit
+  labels:
+    app: fluent-bit
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fluent-bit
+subjects:
+  - kind: ServiceAccount
+    name: fluent-bit
+    namespace: nimbus
+
+---
+# ============================================================================
+# Fluent Bit ConfigMap
+# ============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluent-bit-config
+  labels:
+    app: fluent-bit
+data:
+  fluent-bit.conf: |
+    [SERVICE]
+        Flush         5
+        Log_Level     info
+        Daemon        off
+        Parsers_File  parsers.conf
+        HTTP_Server   On
+        HTTP_Listen   0.0.0.0
+        HTTP_Port     2020
+
+    [INPUT]
+        Name              tail
+        Tag               kube.*
+        Path              /var/log/containers/*.log
+        Parser            docker
+        DB                /var/log/flb_kube.db
+        Mem_Buf_Limit     5MB
+        Skip_Long_Lines   On
+        Refresh_Interval  10
+
+    [FILTER]
+        Name                kubernetes
+        Match               kube.*
+        Kube_URL            https://kubernetes.default.svc:443
+        Kube_CA_File        /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        Kube_Token_File     /var/run/secrets/kubernetes.io/serviceaccount/token
+        Merge_Log           On
+        K8S-Logging.Parser  On
+        K8S-Logging.Exclude On
+
+    [OUTPUT]
+        Name            loki
+        Match           kube.*
+        Host            loki
+        Port            3100
+        Labels          job=fluent-bit, node=${NODE_NAME}
+        Auto_Kubernetes_Labels on
+
+  parsers.conf: |
+    [PARSER]
+        Name        docker
+        Format      json
+        Time_Key    time
+        Time_Format %Y-%m-%dT%H:%M:%S.%L
+        Time_Keep   On
+
+    [PARSER]
+        Name        syslog
+        Format      regex
+        Regex       ^\<(?<pri>[0-9]+)\>(?<time>[^ ]* {1,2}[^ ]* [^ ]*) (?<host>[^ ]*) (?<ident>[a-zA-Z0-9_\/\.\-]*)(?:\[(?<pid>[0-9]+)\])?(?:[^\:]*\:)? *(?<message>.*)$
+        Time_Key    time
+        Time_Format %b %d %H:%M:%S
+
+---
+# ============================================================================
+# Service for Node Exporter (用于 Prometheus 服务发现)
+# ============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: node-exporter
+  labels:
+    app: node-exporter
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9100"
+spec:
+  # Headless Service - 用于服务发现
+  clusterIP: None
+  ports:
+    - name: metrics
+      port: 9100
+      targetPort: 9100
+  selector:
+    app: node-exporter

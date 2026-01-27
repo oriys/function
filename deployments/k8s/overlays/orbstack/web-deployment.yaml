@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nimbus-web
+  labels:
+    app: nimbus-web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nimbus-web
+  template:
+    metadata:
+      labels:
+        app: nimbus-web
+    spec:
+      containers:
+        - name: web
+          image: nimbus-web:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

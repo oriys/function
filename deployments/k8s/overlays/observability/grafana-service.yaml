@@ -1,0 +1,16 @@
+# ============================================================================
+# observability: Grafana Service
+# ============================================================================
+# 文件说明: Grafana 的集群内访问入口（ClusterIP）。
+# ============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+spec:
+  selector:
+    app: grafana
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http

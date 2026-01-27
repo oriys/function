@@ -1,0 +1,163 @@
+# ============================================================================
+# Seed Functions Job
+# ============================================================================
+# 在 Gateway 启动后自动创建示例函数
+# ============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: seed-functions
+  namespace: nimbus
+  labels:
+    app.kubernetes.io/name: seed-functions
+    app.kubernetes.io/component: initialization
+spec:
+  ttlSecondsAfterFinished: 300  # 完成后 5 分钟自动清理
+  backoffLimit: 5
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: seed-functions
+    spec:
+      restartPolicy: OnFailure
+      initContainers:
+        # 等待 Gateway 就绪
+        - name: wait-for-gateway
+          image: curlimages/curl:8.5.0
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Waiting for Gateway to be ready..."
+              until curl -sf http://nimbus-gateway:8080/health/ready; do
+                echo "Gateway not ready, waiting..."
+                sleep 5
+              done
+              echo "Gateway is ready!"
+      containers:
+        - name: seed-functions
+          image: curlimages/curl:8.5.0
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              GATEWAY_URL="http://nimbus-gateway:8080/api/v1/functions"
+
+              echo "=== Seeding example functions ==="
+
+              # Function definitions (embedded JSON)
+              create_function() {
+                local name="$1"
+                local json="$2"
+
+                echo "Creating function: $name"
+                response=$(curl -s -w "\n%{http_code}" -X POST "$GATEWAY_URL" \
+                  -H "Content-Type: application/json" \
+                  -d "$json")
+
+                http_code=$(echo "$response" | tail -n1)
+                body=$(echo "$response" | sed '$d')
+
+                if [ "$http_code" = "201" ]; then
+                  echo "  ✓ Created successfully"
+                elif [ "$http_code" = "409" ]; then
+                  echo "  ○ Already exists, skipping"
+                else
+                  echo "  ✗ Failed (HTTP $http_code): $body"
+                fi
+              }
+
+              # 1. Simple: echo-python
+              create_function "echo-python" '{
+                "name": "echo-python",
+                "description": "Simple echo function that returns the input as-is",
+                "runtime": "python3.11",
+                "handler": "handler.handle",
+                "memory_mb": 128,
+                "timeout_sec": 5,
+                "code": "def handle(event, context):\n    return {\n        \"statusCode\": 200,\n        \"body\": {\n            \"echo\": event,\n            \"message\": \"Echo successful\"\n        }\n    }"
+              }'
+
+              # 2. Simple: hello-python
+              create_function "hello-python" '{
+                "name": "hello-python",
+                "description": "A classic Hello World example in Python 3.11",
+                "runtime": "python3.11",
+                "handler": "handler.handle",
+                "memory_mb": 128,
+                "timeout_sec": 5,
+                "code": "def handle(event, context):\n    print(f\"Received event: {event}\")\n    name = event.get(\"name\", \"World\")\n    return {\n        \"statusCode\": 200,\n        \"body\": {\n            \"message\": f\"Hello, {name}!\",\n            \"runtime\": \"python3.11\"\n        }\n    }"
+              }'
+
+              # 3. Simple: hello-node
+              create_function "hello-node" '{
+                "name": "hello-node",
+                "description": "A classic Hello World example in Node.js 20",
+                "runtime": "nodejs20",
+                "handler": "index.handler",
+                "memory_mb": 128,
+                "timeout_sec": 5,
+                "code": "exports.handler = async (event, context) => {\n    console.log(\"Received event:\", JSON.stringify(event));\n    const name = event.name || \"World\";\n    return {\n        statusCode: 200,\n        body: {\n            message: `Hello, ${name}!`,\n            runtime: \"nodejs20\",\n            timestamp: new Date().toISOString()\n        }\n    };\n};"
+              }'
+
+              # 4. Simple: timestamp-node
+              create_function "timestamp-node" '{
+                "name": "timestamp-node",
+                "description": "Returns current timestamp in multiple formats",
+                "runtime": "nodejs20",
+                "handler": "index.handler",
+                "memory_mb": 128,
+                "timeout_sec": 5,
+                "code": "exports.handler = async (event, context) => {\n    const now = new Date();\n    return {\n        statusCode: 200,\n        body: {\n            iso: now.toISOString(),\n            unix: Math.floor(now.getTime() / 1000),\n            unix_ms: now.getTime(),\n            utc: now.toUTCString(),\n            date: now.toISOString().split(\"T\")[0],\n            time: now.toISOString().split(\"T\")[1].split(\".\")[0]\n        }\n    };\n};"
+              }'
+
+              # 5. Complex: fibonacci-python
+              create_function "fibonacci-python" '{
+                "name": "fibonacci-python",
+                "description": "Calculate Fibonacci sequence (CPU intensive)",
+                "runtime": "python3.11",
+                "handler": "handler.handle",
+                "memory_mb": 256,
+                "timeout_sec": 10,
+                "code": "def fib(n):\n    if n <= 1: return n\n    return fib(n-1) + fib(n-2)\n\ndef handle(event, context):\n    n = int(event.get(\"n\", 10))\n    result = fib(n)\n    return {\n        \"statusCode\": 200,\n        \"body\": {\n            \"n\": n,\n            \"result\": result\n        }\n    }"
+              }'
+
+              # 6. Complex: json-transform-python
+              create_function "json-transform-python" '{
+                "name": "json-transform-python",
+                "description": "Complex JSON data transformation with filtering, mapping, and aggregation",
+                "runtime": "python3.11",
+                "handler": "handler.handle",
+                "memory_mb": 256,
+                "timeout_sec": 30,
+                "code": "def handle(event, context):\n    data = event.get(\"data\", [])\n    operations = event.get(\"operations\", [])\n    result = data\n    \n    for op in operations:\n        op_type = op.get(\"type\")\n        if op_type == \"filter\":\n            field = op.get(\"field\")\n            value = op.get(\"value\")\n            result = [item for item in result if item.get(field) == value]\n        elif op_type == \"sort\":\n            field = op.get(\"field\")\n            reverse = op.get(\"order\", \"asc\") == \"desc\"\n            result = sorted(result, key=lambda x: x.get(field, 0), reverse=reverse)\n        elif op_type == \"map\":\n            fields = op.get(\"fields\", [])\n            result = [{f: item.get(f) for f in fields} for item in result]\n    \n    return {\n        \"statusCode\": 200,\n        \"body\": {\n            \"data\": result,\n            \"count\": len(result)\n        }\n    }"
+              }'
+
+              # 7. Network: http-fetch-python
+              create_function "http-fetch-python" '{
+                "name": "http-fetch-python",
+                "description": "HTTP client for fetching data from external APIs",
+                "runtime": "python3.11",
+                "handler": "handler.handle",
+                "memory_mb": 256,
+                "timeout_sec": 60,
+                "code": "import urllib.request\nimport urllib.error\nimport json\nimport time\n\ndef handle(event, context):\n    url = event.get(\"url\")\n    if not url:\n        return {\"statusCode\": 400, \"body\": {\"error\": \"url is required\"}}\n    \n    method = event.get(\"method\", \"GET\")\n    headers = event.get(\"headers\", {})\n    body = event.get(\"body\")\n    timeout = event.get(\"timeout\", 30)\n    \n    data = None\n    if body:\n        data = json.dumps(body).encode(\"utf-8\") if isinstance(body, dict) else str(body).encode(\"utf-8\")\n        if \"Content-Type\" not in headers:\n            headers[\"Content-Type\"] = \"application/json\"\n    \n    headers[\"User-Agent\"] = \"Nimbus-Function/1.0\"\n    start = time.time()\n    \n    try:\n        req = urllib.request.Request(url, data=data, headers=headers, method=method)\n        with urllib.request.urlopen(req, timeout=timeout) as resp:\n            resp_body = resp.read().decode(\"utf-8\")\n            try:\n                resp_data = json.loads(resp_body)\n            except:\n                resp_data = resp_body\n            return {\n                \"statusCode\": 200,\n                \"body\": {\n                    \"status\": resp.status,\n                    \"data\": resp_data,\n                    \"elapsed_ms\": int((time.time() - start) * 1000)\n                }\n            }\n    except urllib.error.HTTPError as e:\n        return {\"statusCode\": e.code, \"body\": {\"error\": str(e.reason)}}\n    except Exception as e:\n        return {\"statusCode\": 500, \"body\": {\"error\": str(e)}}"
+              }'
+
+              # 8. Network: api-aggregator-node
+              create_function "api-aggregator-node" '{
+                "name": "api-aggregator-node",
+                "description": "Aggregate data from multiple API endpoints with parallel requests",
+                "runtime": "nodejs20",
+                "handler": "index.handler",
+                "memory_mb": 256,
+                "timeout_sec": 60,
+                "code": "const https = require(\"https\");\nconst http = require(\"http\");\n\nexports.handler = async (event, context) => {\n    const { requests = [], options = {} } = event;\n    if (!requests.length) return { statusCode: 400, body: { error: \"requests required\" } };\n    \n    const { timeout = 30000 } = options;\n    \n    const fetchUrl = (config) => new Promise((resolve) => {\n        const start = Date.now();\n        const { url, method = \"GET\", headers = {}, body, name } = config;\n        const parsed = new URL(url);\n        const client = parsed.protocol === \"https:\" ? https : http;\n        \n        const req = client.request({\n            hostname: parsed.hostname,\n            port: parsed.port || (parsed.protocol === \"https:\" ? 443 : 80),\n            path: parsed.pathname + parsed.search,\n            method,\n            headers: { \"User-Agent\": \"Nimbus/1.0\", ...headers },\n            timeout\n        }, (res) => {\n            let data = \"\";\n            res.on(\"data\", c => data += c);\n            res.on(\"end\", () => {\n                let parsed;\n                try { parsed = JSON.parse(data); } catch { parsed = data; }\n                resolve({ name: name || url, success: res.statusCode < 400, status: res.statusCode, data: parsed, elapsed_ms: Date.now() - start });\n            });\n        });\n        req.on(\"error\", (e) => resolve({ name: name || url, success: false, error: e.message, elapsed_ms: Date.now() - start }));\n        req.on(\"timeout\", () => { req.destroy(); resolve({ name: name || url, success: false, error: \"timeout\", elapsed_ms: Date.now() - start }); });\n        if (body) req.write(typeof body === \"object\" ? JSON.stringify(body) : body);\n        req.end();\n    });\n    \n    const results = await Promise.all(requests.map(fetchUrl));\n    const merged = {};\n    results.filter(r => r.success).forEach(r => merged[r.name] = r.data);\n    \n    return { statusCode: 200, body: { merged, results, metadata: { total: results.length, successful: results.filter(r => r.success).length } } };\n};"
+              }'
+
+              echo ""
+              echo "=== Seed completed ==="
+              echo "Listing all functions:"
+              curl -s "$GATEWAY_URL" | head -c 2000
+              echo ""

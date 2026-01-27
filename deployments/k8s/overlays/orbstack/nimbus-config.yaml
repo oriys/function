@@ -1,0 +1,66 @@
+# ============================================================================
+# Function Gateway 配置（orbstack）
+# ============================================================================
+# OrbStack 本地开发配置，运行时使用 docker 模式
+# ============================================================================
+
+server:
+  http_port: 8080
+  invoke_port: 8081
+  metrics_port: 9090
+  shutdown_timeout: 30s
+
+runtime:
+  mode: docker
+
+docker:
+  network_mode: bridge  # 启用网络访问，支持网络请求函数
+  images:
+    python3.11: nimbus-runtime-python3.11:latest
+    nodejs20: nimbus-runtime-nodejs20:latest
+    go1.24: nimbus-runtime-go1.24:latest
+    wasm: nimbus-runtime-wasm:latest
+  pool:
+    enabled: true
+    max_total: 10
+    max_invocations: 1000
+    max_container_age: 1h
+    tmpfs_size_mb: 64
+    disable_resource_limits: true  # 禁用 --memory/--cpus 以避免 cgroup v2 问题
+
+scheduler:
+  workers: 10
+  queue_size: 1000
+  default_timeout: 30s
+  max_retries: 3
+
+storage:
+  postgres:
+    host: postgres
+    port: 5432
+    database: nimbus
+    user: nimbus
+    password: nimbus
+    max_connections: 25
+  redis:
+    address: redis:6379
+    db: 0
+
+events:
+  nats_url: nats://nats:4222
+
+logging:
+  level: info
+  format: json
+
+metrics:
+  enabled: true
+  namespace: nimbus
+
+workflow:
+  enabled: true
+  workers: 5
+  queue_size: 100
+  default_timeout: 300
+  recovery_enabled: true
+  recovery_interval: 30s

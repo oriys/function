@@ -1,0 +1,396 @@
+# ============================================================================
+# Pod Security Standards 配置文件
+# ============================================================================
+# 文件说明: 定义 Pod 安全标准和安全上下文
+#
+# 重要变更:
+# - PodSecurityPolicy (PSP) 在 K8s 1.21 弃用，1.25 移除
+# - 替代方案: Pod Security Admission (PSA) + Pod Security Standards (PSS)
+#
+# Pod Security Standards 三个级别:
+# 1. Privileged (特权): 无限制，用于系统级工作负载
+# 2. Baseline (基线): 防止已知提权，允许默认 Pod 配置
+# 3. Restricted (受限): 最严格，遵循最佳安全实践
+#
+# Pod Security Admission 模式:
+# - enforce: 违反策略的 Pod 将被拒绝
+# - audit: 违反策略的 Pod 被记录，但允许创建
+# - warn: 违反策略的 Pod 会产生警告，但允许创建
+#
+# 面试常问:
+# 1. PodSecurityPolicy 和 Pod Security Admission 的区别?
+# 2. Pod Security Standards 的三个级别是什么?
+# 3. 如何在命名空间级别启用 Pod 安全? (namespace labels)
+# 4. SecurityContext 的 runAsNonRoot 作用? (禁止以 root 运行)
+# 5. 什么是 Capabilities? 如何限制? (Linux 内核能力)
+# ============================================================================
+
+---
+# ============================================================================
+# Namespace with Pod Security Labels
+# ============================================================================
+# 作用: 通过命名空间标签启用 Pod Security Admission
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nimbus
+  labels:
+    app.kubernetes.io/name: nimbus
+    # ----------------------------------------
+    # Pod Security Admission 标签
+    # ----------------------------------------
+    # 格式: pod-security.kubernetes.io/<MODE>: <LEVEL>
+    # MODE: enforce, audit, warn
+    # LEVEL: privileged, baseline, restricted
+
+    # 生产环境推荐配置:
+    # enforce baseline - 强制执行基线策略
+    pod-security.kubernetes.io/enforce: baseline
+    # audit restricted - 审计更严格的策略 (记录但不拒绝)
+    pod-security.kubernetes.io/audit: restricted
+    # warn restricted - 警告更严格的策略
+    pod-security.kubernetes.io/warn: restricted
+
+    # 指定 Pod Security Standards 版本 (可选)
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn-version: latest
+
+---
+# ============================================================================
+# Namespace: 系统组件 (特权级别)
+# ============================================================================
+# 作用: 用于需要特权的系统组件 (DaemonSet, CNI 等)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nimbus-system
+  labels:
+    app.kubernetes.io/name: nimbus-system
+    # 特权级别 - 无安全限制
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged
+
+---
+# ============================================================================
+# Namespace: 严格安全 (受限级别)
+# ============================================================================
+# 作用: 用于高安全要求的工作负载
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nimbus-secure
+  labels:
+    app.kubernetes.io/name: nimbus-secure
+    # 受限级别 - 最严格的安全策略
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+
+---
+# ============================================================================
+# SecurityContext 最佳实践示例
+# ============================================================================
+# 以下是一个完整的安全 Pod 配置示例
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: secure-pod-example
+  labels:
+    app: secure-example
+  annotations:
+    description: "展示 Pod 安全最佳实践的示例配置"
+spec:
+  # ----------------------------------------
+  # Pod 级别 SecurityContext
+  # ----------------------------------------
+  securityContext:
+    # 以非 root 用户运行 (强制所有容器)
+    runAsNonRoot: true
+    # 指定运行用户 ID
+    runAsUser: 1000
+    # 指定运行组 ID
+    runAsGroup: 1000
+    # 指定补充组 (用于文件访问权限)
+    fsGroup: 1000
+    # 文件系统组变更策略
+    # OnRootMismatch: 只在根目录所有者/组不匹配时更改 (性能更好)
+    # Always: 总是更改 (更安全)
+    fsGroupChangePolicy: OnRootMismatch
+    # Seccomp 配置文件
+    seccompProfile:
+      # RuntimeDefault: 使用容器运行时默认配置
+      # Localhost: 使用节点上的自定义配置
+      # Unconfined: 不限制 (不推荐)
+      type: RuntimeDefault
+
+  # 服务账号
+  serviceAccountName: nimbus-gateway
+  # 禁止自动挂载 ServiceAccount Token (如果不需要 API 访问)
+  automountServiceAccountToken: false
+
+  containers:
+    - name: app
+      image: ghcr.io/oriys/nimbus:latest
+      imagePullPolicy: Always
+
+      # ----------------------------------------
+      # 容器级别 SecurityContext
+      # ----------------------------------------
+      securityContext:
+        # 禁止特权模式
+        privileged: false
+        # 禁止提权
+        allowPrivilegeEscalation: false
+        # 以非 root 运行
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        # 只读根文件系统
+        readOnlyRootFilesystem: true
+        # ----------------------------------------
+        # Capabilities 控制
+        # ----------------------------------------
+        capabilities:
+          # 删除所有默认 Capabilities
+          drop:
+            - ALL
+          # 只添加必需的 Capabilities (尽量不添加)
+          # add:
+          #   - NET_BIND_SERVICE  # 绑定低于 1024 的端口
+        # Seccomp 配置
+        seccompProfile:
+          type: RuntimeDefault
+
+      # 资源限制 (防止资源滥用)
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          cpu: 500m
+          memory: 256Mi
+
+      # 卷挂载
+      volumeMounts:
+        # 临时目录 (因为根文件系统只读)
+        - name: tmp
+          mountPath: /tmp
+        # 应用数据目录
+        - name: data
+          mountPath: /app/data
+
+      ports:
+        - containerPort: 8080
+          protocol: TCP
+
+  volumes:
+    # 临时存储
+    - name: tmp
+      emptyDir: {}
+    # 数据存储
+    - name: data
+      emptyDir: {}
+
+  # 不使用宿主机网络
+  hostNetwork: false
+  # 不使用宿主机 PID 命名空间
+  hostPID: false
+  # 不使用宿主机 IPC 命名空间
+  hostIPC: false
+
+---
+# ============================================================================
+# 各安全级别的 Pod 示例对比
+# ============================================================================
+
+# ============================================================================
+# Privileged 级别示例 (系统组件)
+# ============================================================================
+# 用于: DaemonSet (如 CNI, 监控 Agent)
+apiVersion: v1
+kind: Pod
+metadata:
+  name: privileged-pod-example
+  namespace: nimbus-system
+  labels:
+    security-level: privileged
+spec:
+  hostNetwork: true
+  hostPID: true
+  containers:
+    - name: system-tool
+      image: busybox:1.36
+      command: ["sleep", "infinity"]
+      securityContext:
+        privileged: true
+        runAsUser: 0
+      volumeMounts:
+        - name: hostfs
+          mountPath: /host
+  volumes:
+    - name: hostfs
+      hostPath:
+        path: /
+
+---
+# ============================================================================
+# Baseline 级别示例 (一般应用)
+# ============================================================================
+# 用于: 大多数应用，禁止已知提权
+apiVersion: v1
+kind: Pod
+metadata:
+  name: baseline-pod-example
+  namespace: nimbus
+  labels:
+    security-level: baseline
+spec:
+  containers:
+    - name: app
+      image: nginx:alpine
+      securityContext:
+        # Baseline 级别要求:
+        # - 禁止 privileged
+        # - 禁止 hostNetwork/hostPID/hostIPC (大多数情况)
+        # - 禁止危险的 Capabilities
+        # - 允许 runAsUser: 0 (root)
+        privileged: false
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+          add:
+            - NET_BIND_SERVICE  # 允许绑定低端口
+      ports:
+        - containerPort: 80
+
+---
+# ============================================================================
+# Restricted 级别示例 (高安全要求)
+# ============================================================================
+# 用于: 处理敏感数据的应用
+apiVersion: v1
+kind: Pod
+metadata:
+  name: restricted-pod-example
+  namespace: nimbus-secure
+  labels:
+    security-level: restricted
+spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534  # nobody
+    fsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: app
+      image: nginx:alpine
+      securityContext:
+        # Restricted 级别要求:
+        # - 必须 runAsNonRoot: true
+        # - 禁止 privileged
+        # - 禁止 allowPrivilegeEscalation
+        # - 必须 drop ALL capabilities
+        # - 必须设置 seccompProfile
+        # - readOnlyRootFilesystem 推荐但非必须
+        privileged: false
+        allowPrivilegeEscalation: false
+        runAsNonRoot: true
+        runAsUser: 65534
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL
+        seccompProfile:
+          type: RuntimeDefault
+      ports:
+        - containerPort: 8080
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: cache
+          mountPath: /var/cache/nginx
+        - name: run
+          mountPath: /var/run
+  volumes:
+    - name: tmp
+      emptyDir: {}
+    - name: cache
+      emptyDir: {}
+    - name: run
+      emptyDir: {}
+
+---
+# ============================================================================
+# RuntimeClass (可选 - 用于 gVisor/Kata 等沙箱运行时)
+# ============================================================================
+# 作用: 指定 Pod 使用的容器运行时
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: gvisor
+  labels:
+    app: nimbus
+# handler 对应 containerd 配置中的 runtime handler
+handler: runsc
+# 调度约束 - 只调度到支持此运行时的节点
+scheduling:
+  nodeSelector:
+    runtime.gvisor.dev/enabled: "true"
+# 开销 - 沙箱运行时的额外资源开销
+overhead:
+  podFixed:
+    cpu: 100m
+    memory: 64Mi
+
+---
+# ============================================================================
+# 使用 RuntimeClass 的 Pod 示例
+# ============================================================================
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sandboxed-pod-example
+  labels:
+    security-level: sandboxed
+spec:
+  # 使用 gVisor 沙箱运行时
+  runtimeClassName: gvisor
+  containers:
+    - name: app
+      image: nginx:alpine
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+
+---
+# ============================================================================
+# Pod Security Standards 检查清单
+# ============================================================================
+#
+# Restricted 级别要求:
+# ✓ spec.securityContext.runAsNonRoot: true
+# ✓ spec.containers[*].securityContext.runAsNonRoot: true
+# ✓ spec.containers[*].securityContext.allowPrivilegeEscalation: false
+# ✓ spec.containers[*].securityContext.capabilities.drop: ["ALL"]
+# ✓ spec.containers[*].securityContext.seccompProfile.type: RuntimeDefault/Localhost
+# ✗ spec.hostNetwork: false (不能为 true)
+# ✗ spec.hostPID: false (不能为 true)
+# ✗ spec.hostIPC: false (不能为 true)
+# ✗ spec.containers[*].securityContext.privileged: false (不能为 true)
+# ✗ spec.containers[*].ports[*].hostPort: 禁止使用
+# ✗ spec.volumes[*].hostPath: 禁止使用
+#
+# 验证命令:
+# kubectl label --dry-run=server --overwrite ns <namespace> \
+#   pod-security.kubernetes.io/enforce=restricted
+#
+# 检查现有 Pod:
+# kubectl get pods -n <namespace> -o json | \
+#   kubectl apply --dry-run=server -f -
+# ============================================================================

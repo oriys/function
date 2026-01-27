@@ -1,0 +1,34 @@
+# ============================================================================
+# Kustomize Overlay（observability）
+# ============================================================================
+# 文件说明: 可选监控套件（Prometheus + Grafana），默认采集 nimbus-gateway 的 /metrics。
+# 用法: kubectl apply -k deployments/k8s/overlays/observability
+# ============================================================================
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: nimbus
+
+resources:
+  - prometheus-deployment.yaml
+  - prometheus-service.yaml
+  - grafana-deployment.yaml
+  - grafana-service.yaml
+
+configMapGenerator:
+  - name: prometheus-config
+    files:
+      - prometheus.yml=prometheus.yml
+  - name: grafana-datasources
+    files:
+      - datasource.yml=grafana/provisioning/datasources/datasource.yml
+  - name: grafana-dashboard-providers
+    files:
+      - dashboard.yml=grafana/provisioning/dashboards/dashboard.yml
+  - name: grafana-dashboards
+    files:
+      - overview.json=grafana/dashboards/overview.json
+      - vmpool.json=grafana/dashboards/vmpool.json
+
+generatorOptions:
+  disableNameSuffixHash: true

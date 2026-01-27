@@ -1,0 +1,17 @@
+# ============================================================================
+# orbstack: Function Gateway 外部访问 Service
+# ============================================================================
+# 文件说明: 额外创建一个 LoadBalancer Service，便于本地通过宿主机端口访问网关。
+# ============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: nimbus-gateway-external
+spec:
+  type: LoadBalancer
+  selector:
+    app: nimbus-gateway
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

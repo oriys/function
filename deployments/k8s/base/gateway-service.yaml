@@ -1,0 +1,49 @@
+# ============================================================================
+# Gateway Service 配置文件
+# ============================================================================
+# 文件说明: 定义 Nimbus Gateway 的 Service 资源
+#
+# Service 的作用:
+# - 为一组 Pod 提供稳定的网络端点 (ClusterIP)
+# - 实现服务发现 - 通过 DNS 名称访问服务
+# - 负载均衡 - 将流量分发到多个 Pod
+# - 解耦 - 调用者无需关心 Pod 的实际 IP 地址
+#
+# Service 类型:
+# - ClusterIP (默认): 仅集群内部可访问
+# - NodePort: 在每个节点上开放端口
+# - LoadBalancer: 使用云厂商的负载均衡器
+# - ExternalName: 映射到外部 DNS 名称
+# ============================================================================
+
+# API 版本: 核心 API 组 v1 版本
+apiVersion: v1
+# 资源类型: Service (服务)
+kind: Service
+# 元数据
+metadata:
+  # Service 名称 - 同时也是 DNS 名称
+  # 其他 Pod 可以通过 nimbus-gateway.nimbus.svc.cluster.local 访问
+  # 或在同一命名空间内简写为 nimbus-gateway
+  name: nimbus-gateway
+  # 标签 - 用于资源分类和选择
+  labels:
+    app: nimbus-gateway
+# Service 规格
+spec:
+  # Pod 选择器 - 将流量路由到匹配这些标签的 Pod
+  selector:
+    app: nimbus-gateway
+  # 端口配置
+  ports:
+    # HTTP API 端口
+    - name: http
+      port: 8080          # Service 暴露的端口
+      targetPort: http    # 目标 Pod 端口 (可以是端口号或命名端口)
+    # Prometheus 指标端口
+    - name: metrics
+      port: 9090          # Service 暴露的端口
+      targetPort: metrics # 目标 Pod 端口
+  # Service 类型: ClusterIP (默认)
+  # 仅在集群内部可访问，外部访问需要通过 Ingress
+  # type: ClusterIP

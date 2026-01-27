@@ -1,0 +1,11 @@
+# ============================================================================
+# Kustomize Patch（orbstack）：Grafana Service 改为 LoadBalancer
+# ============================================================================
+# 文件说明: 对 observability/grafana-service.yaml 打补丁，便于本地直连访问。
+# ============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+spec:
+  type: LoadBalancer

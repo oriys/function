@@ -1,0 +1,35 @@
+FROM rust:1.75-slim
+
+# Install GDB for debugging (better cross-platform support than LLDB on Docker)
+# Also install Python3 for debugpy-style wrapper
+RUN apt-get update && apt-get install -y \
+    gdb \
+    python3 \
+    python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install debugpy for Python-based DAP support
+# We'll use a Python-based DAP wrapper for GDB
+RUN pip3 install debugpy --break-system-packages || pip3 install debugpy
+
+# Create a GDB-based DAP server script
+COPY rust-gdb-dap-server.py /opt/dap-server/
+
+# Install wasm32 target (for reference, not used in debug mode)
+RUN rustup target add wasm32-unknown-unknown
+
+# Pre-cache common dependencies (serde, serde_json)
+RUN mkdir -p /tmp/cache-project/src && \
+    echo 'fn main() {}' > /tmp/cache-project/src/main.rs && \
+    printf '[package]\nname = "cache"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\nserde = { version = "1.0", features = ["derive"] }\nserde_json = "1.0"\n' > /tmp/cache-project/Cargo.toml && \
+    cd /tmp/cache-project && cargo build && \
+    rm -rf /tmp/cache-project/src /tmp/cache-project/target/debug/cache* /tmp/cache-project/target/debug/deps/cache* && \
+    mv /tmp/cache-project /root/.cargo-cache
+
+# Create source directory
+RUN mkdir -p /tmp/project/src
+
+WORKDIR /tmp
+
+# Default entrypoint
+ENTRYPOINT ["/bin/bash", "-c"]

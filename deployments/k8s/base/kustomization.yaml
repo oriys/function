@@ -1,0 +1,213 @@
+# ============================================================================
+# Kustomization 配置文件
+# ============================================================================
+# 文件说明: Kustomize 配置文件，用于组织和定制 Kubernetes 资源
+#
+# Kustomize 的作用:
+# - 组织多个 YAML 文件
+# - 支持基础配置 (base) 和覆盖配置 (overlay) 的分离
+# - 无需模板，通过 patch 方式定制资源
+# - 支持 ConfigMap/Secret 生成器
+# - 可以设置公共的命名空间、标签、注解等
+#
+# 使用方式:
+# - kubectl apply -k .              # 应用当前目录的 kustomization
+# - kubectl kustomize .             # 预览生成的 YAML
+# - kustomize build .               # 使用 kustomize CLI 构建
+#
+# 目录结构:
+# base/                              # 基础配置
+#   kustomization.yaml              # 本文件
+#   namespace.yaml
+#   gateway-deployment.yaml
+#   ...
+# overlays/                          # 覆盖配置
+#   dev/                             # 开发环境
+#     kustomization.yaml
+#   prod/                            # 生产环境
+#     kustomization.yaml
+# ============================================================================
+
+# API 版本
+apiVersion: kustomize.config.k8s.io/v1beta1
+# 资源类型
+kind: Kustomization
+
+# ----------------------------------------
+# 公共命名空间
+# ----------------------------------------
+# 所有资源将被部署到此命名空间
+# 会覆盖资源文件中定义的 namespace
+namespace: nimbus
+
+# ----------------------------------------
+# 资源列表
+# ----------------------------------------
+# 定义要包含的 Kubernetes 资源文件
+resources:
+  # 命名空间定义
+  - namespace.yaml
+
+  # ----------------------------------------
+  # 核心工作负载 (Core Workloads)
+  # ----------------------------------------
+  # Gateway Deployment - 主要的服务部署
+  - gateway-deployment.yaml
+  # Gateway Service - 服务发现和负载均衡
+  - gateway-service.yaml
+
+  # ----------------------------------------
+  # 入口路由 (L7 路由)
+  # ----------------------------------------
+  # Ingress - 将服务暴露到集群外部
+  - gateway-ingress.yaml
+
+  # ----------------------------------------
+  # 自动扩缩容 (Auto-scaling)
+  # ----------------------------------------
+  # HPA - 水平 Pod 自动扩缩容
+  - gateway-hpa.yaml
+
+  # ----------------------------------------
+  # 高可用 (High Availability)
+  # ----------------------------------------
+  # PDB - Pod 中断预算，保证维护期间的可用性
+  - pdb.yaml
+
+  # ----------------------------------------
+  # 网络安全 (Network Security)
+  # ----------------------------------------
+  # NetworkPolicy - 网络策略，实现零信任网络
+  - network-policies.yaml
+
+  # ----------------------------------------
+  # 资源管理 (Resource Management)
+  # ----------------------------------------
+  # ResourceQuota & LimitRange - 资源配额和限制
+  - resource-quotas.yaml
+
+  # ----------------------------------------
+  # 高级调度 (Advanced Scheduling) - 可选
+  # ----------------------------------------
+  # Affinity 示例配置 (作为参考，默认不启用)
+  # 取消注释以使用带有亲和性配置的 Deployment
+  # - gateway-affinity.yaml
+
+  # ----------------------------------------
+  # 有状态应用 (Stateful Applications) - 可选
+  # ----------------------------------------
+  # PostgreSQL 数据库 - 取消注释以启用
+  # - postgres-statefulset.yaml
+  # Redis 缓存 - 取消注释以启用
+  # - redis-statefulset.yaml
+
+  # ----------------------------------------
+  # 定时任务 (Jobs & CronJobs) - 可选
+  # ----------------------------------------
+  # 数据库备份、日志清理等定时任务
+  # - jobs.yaml
+
+  # ----------------------------------------
+  # RBAC (访问控制) - 可选
+  # ----------------------------------------
+  # Role, RoleBinding, ServiceAccount, ClusterRole
+  # - rbac.yaml
+
+  # ----------------------------------------
+  # DaemonSet (节点级服务) - 可选
+  # ----------------------------------------
+  # Node Exporter, Fluent Bit 等节点级守护进程
+  # - daemonsets.yaml
+
+  # ----------------------------------------
+  # Pod Security (安全策略) - 可选
+  # ----------------------------------------
+  # Pod Security Standards, SecurityContext 示例
+  # - pod-security.yaml
+
+  # ----------------------------------------
+  # CRD 和 Operator - 可选
+  # ----------------------------------------
+  # 自定义资源定义，扩展 K8s API
+  # - crd.yaml
+
+  # ----------------------------------------
+  # PriorityClass (Pod 优先级) - 可选
+  # ----------------------------------------
+  # Pod 调度优先级和抢占配置
+  # - priority-class.yaml
+
+  # ----------------------------------------
+  # Admission Webhook - 可选
+  # ----------------------------------------
+  # 准入控制 Webhook (Mutating/Validating)
+  # - admission-webhook.yaml
+
+  # ----------------------------------------
+  # Cert-Manager 配置 - 可选
+  # ----------------------------------------
+  # TLS 证书自动化管理
+  # - cert-manager.yaml
+
+# ----------------------------------------
+# ConfigMap 生成器
+# ----------------------------------------
+# 从文件生成 ConfigMap
+configMapGenerator:
+  # 生成 nimbus-config ConfigMap
+  - name: nimbus-config
+    # 从文件创建 ConfigMap
+    # 格式: <ConfigMap中的key>=<本地文件路径>
+    files:
+      # 将 nimbus-config.yaml 的内容作为 config.yaml 键
+      - config.yaml=nimbus-config.yaml
+
+# ----------------------------------------
+# 生成器选项
+# ----------------------------------------
+generatorOptions:
+  # 禁用名称后缀哈希
+  # 默认情况下，Kustomize 会在 ConfigMap/Secret 名称后添加内容哈希
+  # 这有助于触发 Pod 重启，但可能导致名称不可预测
+  # 禁用后，名称将保持固定 (如 nimbus-config)
+  disableNameSuffixHash: true
+
+# ----------------------------------------
+# 其他常用配置 (按需启用)
+# ----------------------------------------
+
+# 公共标签 - 添加到所有资源
+# commonLabels:
+#   app.kubernetes.io/name: function
+#   app.kubernetes.io/version: "1.0.0"
+#   app.kubernetes.io/managed-by: kustomize
+
+# 公共注解 - 添加到所有资源
+# commonAnnotations:
+#   owner: platform-team
+#   environment: base
+
+# 镜像覆盖 - 替换镜像标签或仓库
+# images:
+#   - name: ghcr.io/oriys/nimbus
+#     newTag: v1.2.3
+#   - name: ghcr.io/oriys/nimbus
+#     newName: my-registry/nimbus
+#     newTag: latest
+
+# Secret 生成器
+# secretGenerator:
+#   - name: nimbus-secrets
+#     literals:
+#       - db-password=secret123
+#     # 或从文件
+#     # files:
+#     #   - tls.crt
+#     #   - tls.key
+
+# 补丁 (Patches) - 用于修改资源
+# patches:
+#   - path: patch-replicas.yaml
+#     target:
+#       kind: Deployment
+#       name: nimbus-gateway

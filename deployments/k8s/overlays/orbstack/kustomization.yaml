@@ -1,0 +1,52 @@
+# ============================================================================
+# Kustomize Overlay（orbstack）
+# ============================================================================
+# 文件说明: 面向 OrbStack（macOS）本地集群的完整部署配置：
+# - 包含 Gateway、Web UI、数据库、消息队列
+# - 包含可观测性套件（Prometheus + Grafana）
+# - 自动创建示例函数
+# - 将关键 Service 改为 LoadBalancer，便于直接通过 localhost 访问
+#
+# 用法:
+#   一键启动: ./start.sh
+#   手动部署: kubectl apply -k deployments/k8s/overlays/orbstack
+# ============================================================================
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: nimbus
+
+# 引用基础配置和可观测性
+resources:
+  - ../../base
+  - ../observability
+  # 数据存储
+  - postgres.yaml
+  - redis.yaml
+  - nats.yaml
+  # 前端 Web UI
+  - web-deployment.yaml
+  - web-service.yaml
+  # 外部访问
+  - nimbus-gateway-external-service.yaml
+  # 示例函数初始化
+  - seed-functions-job.yaml
+  # 运行时构建文件（供 DinD 构建编译器和运行时镜像）
+  - runtime-build-files.yaml
+
+# 替换 ConfigMap
+configMapGenerator:
+  - name: nimbus-config
+    behavior: replace
+    files:
+      - config.yaml=nimbus-config.yaml
+
+generatorOptions:
+  disableNameSuffixHash: true
+
+# Gateway 使用 DinD sidecar
+patches:
+  - path: gateway-docker-patch.yaml
+  - path: grafana-service-lb-patch.yaml
+  - path: prometheus-service-lb-patch.yaml
+  - path: web-service-lb-patch.yaml

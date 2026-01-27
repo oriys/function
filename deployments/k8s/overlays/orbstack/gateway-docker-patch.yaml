@@ -1,0 +1,141 @@
+# ============================================================================
+# Kustomize Patch（dev-docker）：网关切换为 Docker 模式
+# ============================================================================
+# 文件说明: 对 base/gateway-deployment.yaml 打补丁：
+# - 关闭 privileged（不需要 /dev/kvm）
+# - 增加 dind（docker-in-docker）sidecar，供网关在 Pod 内执行运行时容器
+# - 注入 DOCKER_HOST，并挂载 docker.sock 目录
+# - DinD 启动时自动构建所有编译器和运行时镜像
+# ============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nimbus-gateway
+spec:
+  template:
+    spec:
+      containers:
+        - name: gateway
+          image: nimbus-gateway:latest
+          imagePullPolicy: Never
+          securityContext:
+            privileged: false
+          env:
+            - name: DOCKER_HOST
+              value: unix:///var/run/docker/docker.sock
+          volumeMounts:
+            - mountPath: /dev/kvm
+              $patch: delete
+            - mountPath: /dev/net/tun
+              $patch: delete
+            - name: docker-sock
+              mountPath: /var/run/docker
+            - name: shared-tmp
+              mountPath: /tmp
+        - name: dind
+          image: docker:27-dind
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: DOCKER_TLS_CERTDIR
+              value: ""
+          # Custom entrypoint: start dockerd, then build compiler/runtime images
+          command:
+            - /bin/sh
+            - -c
+            - |
+              # Set Docker socket path
+              export DOCKER_HOST=unix:///var/run/docker/docker.sock
+
+              # Start Docker daemon in background with cgroup v2 workaround
+              # Using --cgroup-parent="" to avoid cgroup v2 threaded mode issues
+              dockerd --host=unix:///var/run/docker/docker.sock --storage-driver=vfs --exec-opt native.cgroupdriver=cgroupfs &
+              DOCKERD_PID=$!
+
+              # Wait for Docker to be ready
+              echo "Waiting for Docker daemon..."
+              for i in $(seq 1 60); do
+                if docker info >/dev/null 2>&1; then
+                  echo "Docker daemon is ready"
+                  break
+                fi
+                sleep 1
+              done
+
+              # Build directory
+              BUILD_DIR=/build-context
+
+              # Build runtime images FIRST (needed for function execution)
+              echo "=== Building runtime images ==="
+
+              # Python runtime
+              echo "Building nimbus-runtime-python3.11:latest..."
+              docker build -t nimbus-runtime-python3.11:latest -f $BUILD_DIR/Dockerfile.python3.11 $BUILD_DIR && echo "✓ nimbus-runtime-python3.11:latest" || echo "✗ Failed"
+
+              # Node.js runtime
+              echo "Building nimbus-runtime-nodejs20:latest..."
+              docker build -t nimbus-runtime-nodejs20:latest -f $BUILD_DIR/Dockerfile.nodejs20 $BUILD_DIR && echo "✓ nimbus-runtime-nodejs20:latest" || echo "✗ Failed"
+
+              # Go runtime
+              echo "Building nimbus-runtime-go1.24:latest..."
+              docker build -t nimbus-runtime-go1.24:latest -f $BUILD_DIR/Dockerfile.go1.24 $BUILD_DIR && echo "✓ nimbus-runtime-go1.24:latest" || echo "✗ Failed"
+
+              # WASM runtime
+              echo "Building nimbus-runtime-wasm:latest..."
+              docker build -t nimbus-runtime-wasm:latest -f $BUILD_DIR/Dockerfile.wasm $BUILD_DIR && echo "✓ nimbus-runtime-wasm:latest" || echo "✗ Failed"
+
+              # Signal that runtime images are ready
+              touch /var/run/docker/images-ready
+              echo "=== Runtime images ready ==="
+              docker images
+
+              # Build compiler images in background (only needed for compiling new functions)
+              echo "=== Building compiler images (background) ==="
+
+              # Rust WASM compiler
+              echo "Building nimbus-rust-wasm-compiler:latest..."
+              docker build -t nimbus-rust-wasm-compiler:latest -f $BUILD_DIR/Dockerfile.rust-wasm-compiler $BUILD_DIR && echo "✓ nimbus-rust-wasm-compiler:latest" || echo "✗ Failed"
+
+              # Pull Go compiler
+              echo "Pulling golang:1.24-alpine..."
+              docker pull golang:1.24-alpine && echo "✓ golang:1.24-alpine" || echo "✗ Failed"
+
+              # Detect architecture for Rust musl
+              ARCH=$(docker version --format '{{.Server.Arch}}' 2>/dev/null || echo "arm64")
+              if [ "$ARCH" = "x86_64" ] || [ "$ARCH" = "amd64" ]; then
+                RUST_MUSL_ARCH="x86_64"
+              else
+                RUST_MUSL_ARCH="aarch64"
+              fi
+              echo "Pulling messense/rust-musl-cross:${RUST_MUSL_ARCH}-musl..."
+              docker pull "messense/rust-musl-cross:${RUST_MUSL_ARCH}-musl" && echo "✓ rust-musl-cross" || echo "✗ Failed"
+
+              echo "=== All images ready ==="
+              docker images
+
+              # Keep dockerd running in foreground
+              wait $DOCKERD_PID
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: docker-sock
+              mountPath: /var/run/docker
+            - name: docker-lib
+              mountPath: /var/lib/docker
+            - name: runtime-build-files
+              mountPath: /build-context
+            - name: shared-tmp
+              mountPath: /tmp
+      volumes:
+        - name: kvm
+          $patch: delete
+        - name: tun
+          $patch: delete
+        - name: docker-sock
+          emptyDir: {}
+        - name: docker-lib
+          emptyDir: {}
+        - name: runtime-build-files
+          configMap:
+            name: runtime-build-files
+        - name: shared-tmp
+          emptyDir: {}

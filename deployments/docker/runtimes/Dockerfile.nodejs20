@@ -1,0 +1,11 @@
+FROM node:20-alpine
+
+RUN adduser -D func || true
+
+WORKDIR /app
+
+COPY runtime-nodejs.js /app/runtime.js
+
+USER func
+
+ENTRYPOINT ["node", "/app/runtime.js"]
