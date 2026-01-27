@@ -1,7 +1,7 @@
 # Binaries
 bin/
-gateway
-nimbus
+/gateway
+/nimbus
 *.exe
 *.exe~
 *.dll
