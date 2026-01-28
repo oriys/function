@@ -65,7 +65,7 @@ export default function TemplateSelector({ onSelect, selectedTemplate }: Templat
       setLoading(true)
       setError(null)
       const response = await templateService.list({ limit: 100 })
-      setTemplates(response.templates)
+      setTemplates(response.templates || [])
     } catch (err) {
       console.error('Failed to load templates:', err)
       setError('加载模板失败，请稍后重试')

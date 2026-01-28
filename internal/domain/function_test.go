@@ -311,3 +311,139 @@ func TestCreateFunctionRequest_Validate_CodeSize(t *testing.T) {
 		})
 	}
 }
+
+// TestValidateCronExpression 测试 cron 表达式验证
+func TestValidateCronExpression(t *testing.T) {
+	tests := []struct {
+		name    string
+		expr    string
+		wantErr bool
+	}{
+		{
+			name:    "empty expression",
+			expr:    "",
+			wantErr: false, // 空表达式是有效的
+		},
+		{
+			name:    "valid 6-field cron (every second)",
+			expr:    "* * * * * *",
+			wantErr: false,
+		},
+		{
+			name:    "valid cron (every minute)",
+			expr:    "0 * * * * *",
+			wantErr: false,
+		},
+		{
+			name:    "valid cron (every 5 minutes)",
+			expr:    "0 */5 * * * *",
+			wantErr: false,
+		},
+		{
+			name:    "valid cron (daily at midnight)",
+			expr:    "0 0 0 * * *",
+			wantErr: false,
+		},
+		{
+			name:    "valid cron (weekdays at 9am)",
+			expr:    "0 0 9 * * 1-5",
+			wantErr: false,
+		},
+		{
+			name:    "invalid expression - too few fields",
+			expr:    "* * * * *",
+			wantErr: true,
+		},
+		{
+			name:    "invalid expression - too many fields",
+			expr:    "* * * * * * *",
+			wantErr: true,
+		},
+		{
+			name:    "invalid expression - invalid seconds",
+			expr:    "60 * * * * *",
+			wantErr: true,
+		},
+		{
+			name:    "invalid expression - invalid minutes",
+			expr:    "0 60 * * * *",
+			wantErr: true,
+		},
+		{
+			name:    "invalid expression - invalid hour",
+			expr:    "0 0 25 * * *",
+			wantErr: true,
+		},
+		{
+			name:    "invalid expression - garbage",
+			expr:    "not a cron expression",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateCronExpression(tt.expr)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateCronExpression(%q) error = %v, wantErr %v", tt.expr, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestCreateFunctionRequest_Validate_CronExpression 测试创建函数请求中的 cron 表达式验证
+func TestCreateFunctionRequest_Validate_CronExpression(t *testing.T) {
+	tests := []struct {
+		name    string
+		req     CreateFunctionRequest
+		wantErr bool
+	}{
+		{
+			name: "valid request with cron expression",
+			req: CreateFunctionRequest{
+				Name:           "test-function",
+				Runtime:        "python3.11",
+				Handler:        "handler.main",
+				Code:           "def main(event): return {}",
+				MemoryMB:       256,
+				TimeoutSec:     30,
+				CronExpression: "0 0 * * * *", // 每小时执行
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid request without cron expression",
+			req: CreateFunctionRequest{
+				Name:       "test-function",
+				Runtime:    "python3.11",
+				Handler:    "handler.main",
+				Code:       "def main(event): return {}",
+				MemoryMB:   256,
+				TimeoutSec: 30,
+			},
+			wantErr: false,
+		},
+		{
+			name: "invalid cron expression",
+			req: CreateFunctionRequest{
+				Name:           "test-function",
+				Runtime:        "python3.11",
+				Handler:        "handler.main",
+				Code:           "def main(event): return {}",
+				MemoryMB:       256,
+				TimeoutSec:     30,
+				CronExpression: "invalid cron",
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.req.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}

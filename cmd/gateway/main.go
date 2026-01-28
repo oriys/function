@@ -235,6 +235,9 @@ func main() {
 	// 在服务重启时，检查并重新触发所有处于 creating/updating/building 状态的函数编译
 	handler.RecoverPendingCompileTasks()
 
+	// 加载默认函数模板
+	api.SeedDefaultTemplates(pgStore, logger)
+
 	router := api.NewRouter(&api.RouterConfig{
 		Handler:         handler,
 		WorkflowHandler: workflowHandler,

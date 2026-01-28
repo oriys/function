@@ -1,10 +1,26 @@
 import { useState, useEffect } from 'react'
-import { Key, Copy, Plus, Trash2, Check, RefreshCw, AlertCircle } from 'lucide-react'
+import { Key, Copy, Plus, Trash2, Check, RefreshCw, AlertCircle, Save, Settings as SettingsIcon } from 'lucide-react'
 import { copyToClipboard, cn } from '../../utils'
 import { apiKeyService, type ApiKey } from '../../services/apikeys'
+import {
+  settingsService,
+  settingGroups,
+  defaultSettings,
+} from '../../services/settings'
+import { useToast } from '../../components/Toast'
 
 export default function Settings() {
+  const toast = useToast()
   const [activeTab, setActiveTab] = useState<'general' | 'apikeys'>('general')
+
+  // System settings state
+  const [settings, setSettings] = useState<Record<string, string>>({})
+  const [originalSettings, setOriginalSettings] = useState<Record<string, string>>({})
+  const [loadingSettings, setLoadingSettings] = useState(true)
+  const [savingSettings, setSavingSettings] = useState(false)
+  const [activeGroup, setActiveGroup] = useState<string>('general')
+
+  // API Keys state
   const [apiKeys, setApiKeys] = useState<ApiKey[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -14,12 +30,88 @@ export default function Settings() {
   const [copiedId, setCopiedId] = useState<string | null>(null)
   const [newlyCreatedKey, setNewlyCreatedKey] = useState<string | null>(null)
 
+  // Load settings on mount
+  useEffect(() => {
+    loadSettings()
+  }, [])
+
   // Load API keys when tab changes to apikeys
   useEffect(() => {
     if (activeTab === 'apikeys') {
       loadApiKeys()
     }
   }, [activeTab])
+
+  const loadSettings = async () => {
+    try {
+      setLoadingSettings(true)
+      const settingsList = await settingsService.list()
+      const settingsMap: Record<string, string> = {}
+
+      // Initialize with defaults
+      for (const [key, value] of Object.entries(defaultSettings)) {
+        settingsMap[key] = value
+      }
+
+      // Override with actual values from API
+      for (const setting of settingsList) {
+        settingsMap[setting.key] = setting.value
+      }
+
+      setSettings(settingsMap)
+      setOriginalSettings({ ...settingsMap })
+    } catch (err) {
+      console.error('Failed to load settings:', err)
+      // Use defaults on error
+      setSettings({ ...defaultSettings })
+      setOriginalSettings({ ...defaultSettings })
+    } finally {
+      setLoadingSettings(false)
+    }
+  }
+
+  const handleSettingChange = (key: string, value: string) => {
+    setSettings((prev) => ({ ...prev, [key]: value }))
+  }
+
+  const hasChanges = () => {
+    return Object.keys(settings).some((key) => settings[key] !== originalSettings[key])
+  }
+
+  const getChangedSettings = (): string[] => {
+    return Object.keys(settings).filter((key) => settings[key] !== originalSettings[key])
+  }
+
+  const handleSaveSettings = async () => {
+    const changedKeys = getChangedSettings()
+    if (changedKeys.length === 0) return
+
+    setSavingSettings(true)
+    let successCount = 0
+
+    try {
+      for (const key of changedKeys) {
+        try {
+          await settingsService.update(key, settings[key])
+          successCount++
+        } catch (err) {
+          console.error(`Failed to save setting ${key}:`, err)
+        }
+      }
+
+      if (successCount === changedKeys.length) {
+        toast.success('设置已保存')
+        setOriginalSettings({ ...settings })
+      } else if (successCount > 0) {
+        toast.warning(`已保存 ${successCount}/${changedKeys.length} 项设置`)
+        await loadSettings() // Reload to get actual values
+      } else {
+        toast.error('保存设置失败')
+      }
+    } finally {
+      setSavingSettings(false)
+    }
+  }
 
   const loadApiKeys = async () => {
     try {
@@ -48,14 +140,12 @@ export default function Settings() {
     try {
       setCreating(true)
       const result = await apiKeyService.create(newKeyName)
-      // Store the newly created key to show to user
       setNewlyCreatedKey(result.api_key)
-      // Refresh the list
       await loadApiKeys()
       setNewKeyName('')
     } catch (err) {
       console.error('Failed to create API key:', err)
-      alert('创建 API Key 失败')
+      toast.error('创建 API Key 失败')
     } finally {
       setCreating(false)
     }
@@ -66,9 +156,10 @@ export default function Settings() {
     try {
       await apiKeyService.delete(id)
       setApiKeys(apiKeys.filter((k) => k.id !== id))
+      toast.success('API Key 已删除')
     } catch (err) {
       console.error('Failed to delete API key:', err)
-      alert('删除 API Key 失败')
+      toast.error('删除 API Key 失败')
     }
   }
 
@@ -78,12 +169,100 @@ export default function Settings() {
     setNewlyCreatedKey(null)
   }
 
+  // Render setting input based on type
+  const renderSettingInput = (setting: { key: string; type: string; options?: { value: string; label: string }[]; unit?: string; readonly?: boolean }) => {
+    const value = settings[setting.key] || ''
+    const isChanged = settings[setting.key] !== originalSettings[setting.key]
+
+    if (setting.readonly) {
+      return (
+        <input
+          type="text"
+          value={value}
+          readOnly
+          className="w-full max-w-xs px-4 py-2 bg-secondary border border-border rounded-lg text-muted-foreground"
+        />
+      )
+    }
+
+    if (setting.type === 'select' && setting.options) {
+      return (
+        <div className="flex items-center gap-2">
+          <select
+            value={value}
+            onChange={(e) => handleSettingChange(setting.key, e.target.value)}
+            className={cn(
+              'w-full max-w-xs px-4 py-2 bg-input border rounded-lg text-foreground focus:outline-none focus:ring-2 focus:ring-ring transition-all',
+              isChanged ? 'border-accent' : 'border-border'
+            )}
+          >
+            {setting.options.map((opt) => (
+              <option key={opt.value} value={opt.value}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
+          {isChanged && <span className="text-xs text-accent">已修改</span>}
+        </div>
+      )
+    }
+
+    if (setting.type === 'number') {
+      return (
+        <div className="flex items-center gap-2">
+          <input
+            type="number"
+            value={value}
+            onChange={(e) => handleSettingChange(setting.key, e.target.value)}
+            className={cn(
+              'w-32 px-4 py-2 bg-input border rounded-lg text-foreground focus:outline-none focus:ring-2 focus:ring-ring transition-all',
+              isChanged ? 'border-accent' : 'border-border'
+            )}
+          />
+          {setting.unit && <span className="text-sm text-muted-foreground">{setting.unit}</span>}
+          {isChanged && <span className="text-xs text-accent">已修改</span>}
+        </div>
+      )
+    }
+
+    return (
+      <div className="flex items-center gap-2">
+        <input
+          type="text"
+          value={value}
+          onChange={(e) => handleSettingChange(setting.key, e.target.value)}
+          className={cn(
+            'w-full max-w-md px-4 py-2 bg-input border rounded-lg text-foreground focus:outline-none focus:ring-2 focus:ring-ring transition-all',
+            isChanged ? 'border-accent' : 'border-border'
+          )}
+        />
+        {isChanged && <span className="text-xs text-accent">已修改</span>}
+      </div>
+    )
+  }
+
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div>
-        <h1 className="text-2xl font-bold text-foreground">设置</h1>
-        <p className="text-muted-foreground mt-1">管理系统配置和 API 密钥</p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-display font-bold text-foreground">设置</h1>
+          <p className="text-muted-foreground mt-1">管理系统配置和 API 密钥</p>
+        </div>
+        {activeTab === 'general' && hasChanges() && (
+          <button
+            onClick={handleSaveSettings}
+            disabled={savingSettings}
+            className={cn(
+              'inline-flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg transition-colors',
+              'bg-accent text-accent-foreground hover:bg-accent/90',
+              savingSettings && 'opacity-50 cursor-not-allowed'
+            )}
+          >
+            <Save className={cn('w-4 h-4', savingSettings && 'animate-pulse')} />
+            {savingSettings ? '保存中...' : '保存更改'}
+          </button>
+        )}
       </div>
 
       {/* Tabs */}
@@ -98,7 +277,7 @@ export default function Settings() {
                 : 'border-transparent text-muted-foreground hover:text-foreground hover:border-border'
             )}
           >
-            基本设置
+            系统设置
           </button>
           <button
             onClick={() => setActiveTab('apikeys')}
@@ -114,46 +293,65 @@ export default function Settings() {
         </nav>
       </div>
 
-      {/* General Settings */}
+      {/* System Settings */}
       {activeTab === 'general' && (
-        <div className="bg-card rounded-xl border border-border p-6">
-          <h2 className="text-lg font-semibold text-foreground mb-4">基本设置</h2>
-          <div className="space-y-6">
-            <div>
-              <label className="block text-sm font-medium text-foreground mb-1">
-                API 地址
-              </label>
-              <input
-                type="text"
-                value={window.location.origin}
-                readOnly
-                className="w-full max-w-md px-4 py-2 bg-secondary border border-border rounded-lg text-muted-foreground"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-foreground mb-1">
-                默认超时时间（秒）
-              </label>
-              <input
-                type="number"
-                defaultValue={30}
-                className="w-32 px-4 py-2 bg-input border border-border rounded-lg text-foreground focus:outline-none focus:ring-2 focus:ring-ring transition-all"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-foreground mb-1">
-                默认内存（MB）
-              </label>
-              <select
-                defaultValue={128}
-                className="w-32 px-4 py-2 bg-input border border-border rounded-lg text-foreground focus:outline-none focus:ring-2 focus:ring-ring transition-all"
-              >
-                <option value={128}>128</option>
-                <option value={256}>256</option>
-                <option value={512}>512</option>
-                <option value={1024}>1024</option>
-              </select>
-            </div>
+        <div className="flex gap-6">
+          {/* Settings Groups Sidebar */}
+          <div className="w-48 flex-shrink-0">
+            <nav className="space-y-1">
+              {settingGroups.map((group) => (
+                <button
+                  key={group.id}
+                  onClick={() => setActiveGroup(group.id)}
+                  className={cn(
+                    'w-full text-left px-3 py-2 text-sm rounded-lg transition-colors',
+                    activeGroup === group.id
+                      ? 'bg-accent text-accent-foreground font-medium'
+                      : 'text-muted-foreground hover:text-foreground hover:bg-muted'
+                  )}
+                >
+                  {group.label}
+                </button>
+              ))}
+            </nav>
+          </div>
+
+          {/* Settings Content */}
+          <div className="flex-1">
+            {loadingSettings ? (
+              <div className="bg-card rounded-xl border border-border p-6">
+                <div className="flex items-center justify-center py-8">
+                  <RefreshCw className="w-6 h-6 text-accent animate-spin" />
+                </div>
+              </div>
+            ) : (
+              settingGroups
+                .filter((group) => group.id === activeGroup)
+                .map((group) => (
+                  <div key={group.id} className="bg-card rounded-xl border border-border p-6">
+                    <div className="flex items-center gap-3 mb-6">
+                      <div className="p-2 bg-accent/10 rounded-lg">
+                        <SettingsIcon className="w-5 h-5 text-accent" />
+                      </div>
+                      <div>
+                        <h2 className="text-lg font-semibold text-foreground">{group.label}</h2>
+                        <p className="text-sm text-muted-foreground">{group.description}</p>
+                      </div>
+                    </div>
+                    <div className="space-y-6">
+                      {group.settings.map((setting) => (
+                        <div key={setting.key}>
+                          <label className="block text-sm font-medium text-foreground mb-1">
+                            {setting.label}
+                          </label>
+                          <p className="text-xs text-muted-foreground mb-2">{setting.description}</p>
+                          {renderSettingInput(setting)}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))
+            )}
           </div>
         </div>
       )}
@@ -248,7 +446,9 @@ export default function Settings() {
                         请保存您的 API Key，它只会显示一次：
                       </p>
                       <div className="flex items-center bg-secondary rounded-lg p-3">
-                        <code className="flex-1 text-sm font-mono text-foreground break-all">{newlyCreatedKey}</code>
+                        <code className="flex-1 text-sm font-mono text-foreground break-all">
+                          {newlyCreatedKey}
+                        </code>
                         <button
                           onClick={() => handleCopyKey(newlyCreatedKey, 'new')}
                           className="ml-2 p-2 text-muted-foreground hover:text-foreground hover:bg-card rounded-lg flex-shrink-0 transition-colors"
@@ -277,9 +477,7 @@ export default function Settings() {
                   <>
                     <h3 className="text-lg font-semibold text-foreground mb-4">创建 API Key</h3>
                     <div className="mb-4">
-                      <label className="block text-sm font-medium text-foreground mb-1">
-                        名称
-                      </label>
+                      <label className="block text-sm font-medium text-foreground mb-1">名称</label>
                       <input
                         type="text"
                         value={newKeyName}

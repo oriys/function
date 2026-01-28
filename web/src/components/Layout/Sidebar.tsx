@@ -10,6 +10,12 @@ import {
   Layers,
   Globe,
   GitBranch,
+  AlertTriangle,
+  FileText,
+  Gauge,
+  Bell,
+  Network,
+  Flame,
 } from 'lucide-react'
 import { cn } from '../../utils/format'
 
@@ -17,11 +23,17 @@ const navItems = [
   { to: '/dashboard', icon: LayoutDashboard, label: '概览' },
   { to: '/functions', icon: Code2, label: '函数' },
   { to: '/workflows', icon: GitBranch, label: '工作流' },
+  { to: '/dependencies', icon: Network, label: '依赖分析' },
   { to: '/invocations', icon: PlayCircle, label: '调用' },
+  { to: '/dlq', icon: AlertTriangle, label: '死信队列' },
   { to: '/layers', icon: Layers, label: '层' },
   { to: '/environments', icon: Globe, label: '环境' },
+  { to: '/warming', icon: Flame, label: '预热' },
   { to: '/logs', icon: ScrollText, label: '日志' },
   { to: '/metrics', icon: BarChart3, label: '监控' },
+  { to: '/alerts', icon: Bell, label: '告警' },
+  { to: '/quota', icon: Gauge, label: '配额' },
+  { to: '/audit', icon: FileText, label: '审计' },
   { to: '/settings', icon: Settings, label: '设置' },
 ]
 

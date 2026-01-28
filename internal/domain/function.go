@@ -6,6 +6,8 @@ package domain
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/robfig/cron/v3"
 )
 
 // Runtime 表示函数运行时类型。
@@ -46,6 +48,22 @@ func ValidateCodeSize(code string) error {
 func ValidateBinarySize(binary string) error {
 	if len(binary) > MaxBinarySize {
 		return ErrBinarySizeExceeded
+	}
+	return nil
+}
+
+// ValidateCronExpression 验证 cron 表达式是否有效
+// 支持标准 6 字段格式（包含秒）：秒 分 时 日 月 星期
+// 返回 nil 表示验证通过，否则返回 ErrInvalidCronExpression
+func ValidateCronExpression(expr string) error {
+	if expr == "" {
+		return nil // 空表达式是有效的（表示无定时任务）
+	}
+	// 使用支持秒级的 cron 解析器进行验证
+	parser := cron.NewParser(cron.Second | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
+	_, err := parser.Parse(expr)
+	if err != nil {
+		return ErrInvalidCronExpression
 	}
 	return nil
 }
@@ -276,7 +294,10 @@ func (r *CreateFunctionRequest) Validate() error {
 			return err
 		}
 	}
-	// TODO: 这里将来可以增加对 CronExpression 的语法校验
+	// 验证 cron 表达式语法
+	if err := ValidateCronExpression(r.CronExpression); err != nil {
+		return err
+	}
 	// 如果未指定内存，设置默认值为 256MB
 	if r.MemoryMB == 0 {
 		r.MemoryMB = 256

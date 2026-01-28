@@ -188,6 +188,21 @@ func NewRouter(cfg *RouterConfig) *chi.Mux {
 					// PUT /api/v1/functions/{id}/environments/{env} - 更新函数环境配置
 					r.Put("/{env}", h.UpdateFunctionEnvConfig)
 				})
+
+				// 预热管理路由组
+				r.Route("/warming", func(r chi.Router) {
+					// GET /api/v1/functions/{id}/warming - 获取预热状态
+					r.Get("/", h.GetWarmingStatus)
+					// PUT /api/v1/functions/{id}/warming - 更新预热策略
+					r.Put("/", h.UpdateWarmingPolicy)
+				})
+				// POST /api/v1/functions/{id}/warm - 触发预热
+				r.Post("/warm", h.TriggerWarming)
+
+				// GET /api/v1/functions/{id}/dependencies - 获取函数依赖关系
+				r.Get("/dependencies", h.GetFunctionDependencies)
+				// GET /api/v1/functions/{id}/impact - 获取影响分析
+				r.Get("/impact", h.GetImpactAnalysis)
 			})
 		})
 
@@ -301,6 +316,44 @@ func NewRouter(cfg *RouterConfig) *chi.Mux {
 		// 配额管理路由
 		// GET /api/v1/quota - 获取配额使用情况
 		r.Get("/quota", h.GetQuotaUsage)
+
+		// 告警管理路由组
+		r.Route("/alerts", func(r chi.Router) {
+			// GET /api/v1/alerts - 获取告警列表
+			r.Get("/", h.ListAlerts)
+			// POST /api/v1/alerts/{id}/resolve - 解决告警
+			r.Post("/{id}/resolve", h.ResolveAlert)
+
+			// 告警规则
+			r.Route("/rules", func(r chi.Router) {
+				// GET /api/v1/alerts/rules - 获取告警规则列表
+				r.Get("/", h.ListAlertRules)
+				// POST /api/v1/alerts/rules - 创建告警规则
+				r.Post("/", h.CreateAlertRule)
+				// GET /api/v1/alerts/rules/{id} - 获取告警规则详情
+				r.Get("/{id}", h.GetAlertRule)
+				// PUT /api/v1/alerts/rules/{id} - 更新告警规则
+				r.Put("/{id}", h.UpdateAlertRule)
+				// DELETE /api/v1/alerts/rules/{id} - 删除告警规则
+				r.Delete("/{id}", h.DeleteAlertRule)
+			})
+
+			// 通知渠道
+			r.Route("/channels", func(r chi.Router) {
+				// GET /api/v1/alerts/channels - 获取通知渠道列表
+				r.Get("/", h.ListNotificationChannels)
+				// POST /api/v1/alerts/channels - 创建通知渠道
+				r.Post("/", h.CreateNotificationChannel)
+				// DELETE /api/v1/alerts/channels/{id} - 删除通知渠道
+				r.Delete("/{id}", h.DeleteNotificationChannel)
+			})
+		})
+
+		// 依赖分析路由组
+		r.Route("/dependencies", func(r chi.Router) {
+			// GET /api/v1/dependencies/graph - 获取依赖关系图
+			r.Get("/graph", h.GetDependencyGraph)
+		})
 
 		// 工作流管理路由组
 		if cfg.WorkflowHandler != nil {

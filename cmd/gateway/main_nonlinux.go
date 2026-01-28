@@ -144,6 +144,9 @@ func main() {
 	// 恢复未完成的编译任务
 	handler.RecoverPendingCompileTasks()
 
+	// 加载默认函数模板
+	api.SeedDefaultTemplates(pgStore, logger)
+
 	router := api.NewRouter(&api.RouterConfig{
 		Handler:         handler,
 		WorkflowHandler: workflowHandler,

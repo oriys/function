@@ -9,10 +9,16 @@ import FunctionList from './pages/Functions/List'
 import FunctionCreate from './pages/Functions/Create'
 import InvocationList from './pages/Invocations/List'
 import InvocationDetail from './pages/Invocations/Detail'
+import DLQ from './pages/DLQ'
 import Logs from './pages/Logs'
 import Settings from './pages/Settings'
 import Layers from './pages/Layers'
 import Environments from './pages/Environments'
+import AuditLogs from './pages/AuditLogs'
+import Quota from './pages/Quota'
+import Alerts from './pages/Alerts'
+import Dependencies from './pages/Dependencies'
+import Warming from './pages/Warming'
 
 // Lazy load heavy pages (Monaco Editor, ECharts, ReactFlow)
 const FunctionDetail = lazy(() => import('./pages/Functions/Detail'))
@@ -83,6 +89,7 @@ function App() {
         } />
         <Route path="layers" element={<Layers />} />
         <Route path="environments" element={<Environments />} />
+        <Route path="dlq" element={<DLQ />} />
         <Route path="logs" element={<Logs />} />
         <Route path="metrics" element={
           <Suspense fallback={<PageLoading />}>
@@ -90,6 +97,11 @@ function App() {
           </Suspense>
         } />
         <Route path="settings" element={<Settings />} />
+        <Route path="audit" element={<AuditLogs />} />
+        <Route path="quota" element={<Quota />} />
+        <Route path="alerts" element={<Alerts />} />
+        <Route path="dependencies" element={<Dependencies />} />
+        <Route path="warming" element={<Warming />} />
       </Route>
     </Routes>
   )

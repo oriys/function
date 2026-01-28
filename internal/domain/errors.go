@@ -29,6 +29,8 @@ var (
 	ErrInvalidMemory = errors.New("invalid memory: must be between 128MB and 3072MB")
 	// ErrInvalidTimeout 表示超时配置超出有效范围（必须在 1 到 300 秒之间）
 	ErrInvalidTimeout = errors.New("invalid timeout: must be between 1 and 300 seconds")
+	// ErrInvalidCronExpression 表示定时任务表达式无效
+	ErrInvalidCronExpression = errors.New("invalid cron expression")
 
 	// ========== 调用相关错误 ==========
 

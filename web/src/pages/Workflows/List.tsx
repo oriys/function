@@ -9,6 +9,7 @@ import Pagination from '../../components/Pagination'
 import EmptyState from '../../components/EmptyState'
 import { Skeleton } from '../../components/Skeleton'
 import { useToast } from '../../components/Toast'
+import ExecutionInputDialog from '../../components/ExecutionInputDialog'
 
 export default function WorkflowList() {
   const navigate = useNavigate()
@@ -18,6 +19,10 @@ export default function WorkflowList() {
   const [loading, setLoading] = useState(true)
   const [page, setPage] = useState(1)
   const limit = 10
+
+  // 执行对话框状态
+  const [selectedWorkflow, setSelectedWorkflow] = useState<Workflow | null>(null)
+  const [showExecutionDialog, setShowExecutionDialog] = useState(false)
 
   const fetchWorkflows = async () => {
     setLoading(true)
@@ -55,11 +60,19 @@ export default function WorkflowList() {
     }
   }
 
-  const handleStartExecution = async (workflow: Workflow) => {
+  const handleOpenExecutionDialog = (workflow: Workflow) => {
+    setSelectedWorkflow(workflow)
+    setShowExecutionDialog(true)
+  }
+
+  const handleStartExecution = async (input: Record<string, unknown>) => {
+    if (!selectedWorkflow) return
+
     try {
-      const execution = await workflowService.startExecution(workflow.id)
+      const execution = await workflowService.startExecution(selectedWorkflow.id, { input })
       toast.success('执行已启动')
-      navigate(`/workflows/${workflow.id}/executions/${execution.id}`)
+      setShowExecutionDialog(false)
+      navigate(`/workflows/${selectedWorkflow.id}/executions/${execution.id}`)
     } catch (error) {
       console.error('Failed to start execution:', error)
       toast.error('启动执行失败')
@@ -159,7 +172,7 @@ export default function WorkflowList() {
                 </div>
                 <div className="flex items-center gap-2 ml-4">
                   <button
-                    onClick={() => handleStartExecution(workflow)}
+                    onClick={() => handleOpenExecutionDialog(workflow)}
                     disabled={workflow.status !== 'active'}
                     className={cn(
                       'p-2 rounded-lg transition-colors',
@@ -201,6 +214,14 @@ export default function WorkflowList() {
           onChange={setPage}
         />
       )}
+
+      {/* Execution Input Dialog */}
+      <ExecutionInputDialog
+        workflowName={selectedWorkflow?.name || ''}
+        isOpen={showExecutionDialog}
+        onConfirm={handleStartExecution}
+        onClose={() => setShowExecutionDialog(false)}
+      />
     </div>
   )
 }

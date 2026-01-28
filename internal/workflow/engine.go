@@ -270,6 +270,11 @@ func (e *Engine) StartExecution(workflowID string, input json.RawMessage) (*doma
 		return nil, fmt.Errorf("failed to marshal workflow definition: %w", err)
 	}
 
+	// 确保 input 不为 nil
+	if len(input) == 0 {
+		input = json.RawMessage("{}")
+	}
+
 	// 创建执行实例
 	exec := &domain.WorkflowExecution{
 		ID:                 uuid.New().String(),

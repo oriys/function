@@ -327,7 +327,7 @@ REQEOF
         result=$(curl -s -w "%{http_code}" -o /dev/null -X POST "$API_URL/api/v1/functions" \
             -H "Content-Type: application/json" \
             -d @request.json 2>/dev/null)
-        if [ "$result" = "201" ]; then
+        if [ "$result" = "201" ] || [ "$result" = "200" ]; then
             log_success "  hello-go 创建成功"
         elif [ "$result" = "409" ]; then
             log_info "  hello-go 已存在"
@@ -392,7 +392,7 @@ REQEOF
         result=$(curl -s -w "%{http_code}" -o /dev/null -X POST "$API_URL/api/v1/functions" \
             -H "Content-Type: application/json" \
             -d @request.json 2>/dev/null)
-        if [ "$result" = "201" ]; then
+        if [ "$result" = "201" ] || [ "$result" = "200" ]; then
             log_success "  fibonacci-go 创建成功"
         elif [ "$result" = "409" ]; then
             log_info "  fibonacci-go 已存在"
@@ -478,7 +478,7 @@ REQEOF
         result=$(curl -s -w "%{http_code}" -o /dev/null -X POST "$API_URL/api/v1/functions" \
             -H "Content-Type: application/json" \
             -d @request.json 2>/dev/null)
-        if [ "$result" = "201" ]; then
+        if [ "$result" = "201" ] || [ "$result" = "200" ]; then
             log_success "  hello-rust 创建成功"
         elif [ "$result" = "409" ]; then
             log_info "  hello-rust 已存在"
@@ -607,7 +607,7 @@ REQEOF
         result=$(curl -s -w "%{http_code}" -o /dev/null -X POST "$API_URL/api/v1/functions" \
             -H "Content-Type: application/json" \
             -d @request.json 2>/dev/null)
-        if [ "$result" = "201" ]; then
+        if [ "$result" = "201" ] || [ "$result" = "200" ]; then
             log_success "  fibonacci-rust 创建成功"
         elif [ "$result" = "409" ]; then
             log_info "  fibonacci-rust 已存在"
@@ -698,7 +698,7 @@ REQEOF
         result=$(curl -s -w "%{http_code}" -o /dev/null -X POST "$API_URL/api/v1/functions" \
             -H "Content-Type: application/json" \
             -d @request.json 2>/dev/null)
-        if [ "$result" = "201" ]; then
+        if [ "$result" = "201" ] || [ "$result" = "200" ]; then
             log_success "  hello-c 创建成功"
         elif [ "$result" = "409" ]; then
             log_info "  hello-c 已存在"
@@ -809,7 +809,7 @@ REQEOF
         result=$(curl -s -w "%{http_code}" -o /dev/null -X POST "$API_URL/api/v1/functions" \
             -H "Content-Type: application/json" \
             -d @request.json 2>/dev/null)
-        if [ "$result" = "201" ]; then
+        if [ "$result" = "201" ] || [ "$result" = "200" ]; then
             log_success "  fibonacci-c 创建成功"
         elif [ "$result" = "409" ]; then
             log_info "  fibonacci-c 已存在"

@@ -26,6 +26,12 @@ import {
   Layers,
   Tag,
   RotateCcw,
+  Link2,
+  Key,
+  Eye,
+  EyeOff,
+  Power,
+  PowerOff,
 } from 'lucide-react'
 import Editor, { DiffEditor } from '@monaco-editor/react'
 import ReactECharts from 'echarts-for-react'
@@ -815,6 +821,12 @@ export default function FunctionDetail() {
   // 版本对比状态
   const [showVersionDiff, setShowVersionDiff] = useState(false)
 
+  // Webhook 管理状态
+  const [webhookUrl, setWebhookUrl] = useState<string>('')
+  const [webhookKey, setWebhookKey] = useState<string>('')
+  const [webhookOperating, setWebhookOperating] = useState(false)
+  const [showWebhookKey, setShowWebhookKey] = useState(false)
+
   // 层绑定模态框状态
   const [showLayerBindingModal, setShowLayerBindingModal] = useState(false)
 
@@ -1025,6 +1037,60 @@ export default function FunctionDetail() {
     } catch (error) {
       console.error('Failed to delete alias:', error)
       alert('删除失败')
+    }
+  }
+
+  // Webhook 操作
+  const handleEnableWebhook = async () => {
+    if (!id) return
+    try {
+      setWebhookOperating(true)
+      const result = await functionService.enableWebhook(id)
+      setWebhookUrl(result.webhook_url)
+      setWebhookKey(result.webhook_key)
+      await loadFunction()
+      toast.success('Webhook 已启用')
+    } catch (error) {
+      console.error('Failed to enable webhook:', error)
+      toast.error('启用 Webhook 失败')
+    } finally {
+      setWebhookOperating(false)
+    }
+  }
+
+  const handleDisableWebhook = async () => {
+    if (!id) return
+    if (!confirm('确定要禁用 Webhook 吗？禁用后外部将无法通过 Webhook URL 调用此函数。')) return
+    try {
+      setWebhookOperating(true)
+      await functionService.disableWebhook(id)
+      setWebhookUrl('')
+      setWebhookKey('')
+      setShowWebhookKey(false)
+      await loadFunction()
+      toast.success('Webhook 已禁用')
+    } catch (error) {
+      console.error('Failed to disable webhook:', error)
+      toast.error('禁用 Webhook 失败')
+    } finally {
+      setWebhookOperating(false)
+    }
+  }
+
+  const handleRegenerateWebhookKey = async () => {
+    if (!id) return
+    if (!confirm('确定要重新生成 Webhook 密钥吗？旧密钥将立即失效。')) return
+    try {
+      setWebhookOperating(true)
+      const result = await functionService.regenerateWebhookKey(id)
+      setWebhookKey(result.webhook_key)
+      setShowWebhookKey(true)
+      toast.success('Webhook 密钥已重新生成')
+    } catch (error) {
+      console.error('Failed to regenerate webhook key:', error)
+      toast.error('重新生成密钥失败')
+    } finally {
+      setWebhookOperating(false)
     }
   }
 
@@ -1852,6 +1918,152 @@ export default function FunctionDetail() {
                 </p>
               </div>
             </div>
+          </div>
+
+          {/* Webhook 配置 */}
+          <div className="bg-card rounded-xl border border-border p-6 lg:col-span-2">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-3">
+                <div className={cn(
+                  'p-2 rounded-lg',
+                  fn.webhook_enabled ? 'bg-green-500/10' : 'bg-muted'
+                )}>
+                  <Link2 className={cn(
+                    'w-5 h-5',
+                    fn.webhook_enabled ? 'text-green-500' : 'text-muted-foreground'
+                  )} />
+                </div>
+                <div>
+                  <h3 className="text-lg font-semibold text-foreground">Webhook</h3>
+                  <p className="text-sm text-muted-foreground">
+                    {fn.webhook_enabled ? '已启用 - 外部可通过 URL 触发函数' : '未启用'}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={fn.webhook_enabled ? handleDisableWebhook : handleEnableWebhook}
+                disabled={webhookOperating}
+                className={cn(
+                  'inline-flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg transition-colors',
+                  fn.webhook_enabled
+                    ? 'bg-red-500/10 text-red-500 hover:bg-red-500/20'
+                    : 'bg-green-500/10 text-green-500 hover:bg-green-500/20',
+                  webhookOperating && 'opacity-50 cursor-not-allowed'
+                )}
+              >
+                {webhookOperating ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : fn.webhook_enabled ? (
+                  <PowerOff className="w-4 h-4" />
+                ) : (
+                  <Power className="w-4 h-4" />
+                )}
+                {fn.webhook_enabled ? '禁用' : '启用'}
+              </button>
+            </div>
+
+            {fn.webhook_enabled && (
+              <div className="space-y-4 pt-4 border-t border-border">
+                {/* Webhook URL */}
+                <div>
+                  <label className="block text-sm font-medium text-muted-foreground mb-2">
+                    Webhook URL
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={webhookUrl || `${window.location.origin}/api/v1/webhook/${fn.id}`}
+                      readOnly
+                      className="flex-1 px-4 py-2 bg-secondary border border-border rounded-lg text-foreground font-mono text-sm"
+                    />
+                    <button
+                      onClick={async () => {
+                        const url = webhookUrl || `${window.location.origin}/api/v1/webhook/${fn.id}`
+                        await navigator.clipboard.writeText(url)
+                        toast.success('URL 已复制')
+                      }}
+                      className="p-2 text-muted-foreground hover:text-foreground hover:bg-muted rounded-lg transition-colors"
+                      title="复制 URL"
+                    >
+                      <Copy className="w-4 h-4" />
+                    </button>
+                    <a
+                      href={webhookUrl || `${window.location.origin}/api/v1/webhook/${fn.id}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="p-2 text-muted-foreground hover:text-foreground hover:bg-muted rounded-lg transition-colors"
+                      title="在新窗口打开"
+                    >
+                      <ExternalLink className="w-4 h-4" />
+                    </a>
+                  </div>
+                </div>
+
+                {/* Webhook 密钥 */}
+                <div>
+                  <label className="block text-sm font-medium text-muted-foreground mb-2">
+                    Webhook 密钥
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <div className="flex-1 flex items-center gap-2 px-4 py-2 bg-secondary border border-border rounded-lg">
+                      <Key className="w-4 h-4 text-muted-foreground" />
+                      <input
+                        type={showWebhookKey ? 'text' : 'password'}
+                        value={webhookKey || fn.webhook_key || '••••••••••••••••'}
+                        readOnly
+                        className="flex-1 bg-transparent text-foreground font-mono text-sm outline-none"
+                      />
+                    </div>
+                    <button
+                      onClick={() => setShowWebhookKey(!showWebhookKey)}
+                      className="p-2 text-muted-foreground hover:text-foreground hover:bg-muted rounded-lg transition-colors"
+                      title={showWebhookKey ? '隐藏密钥' : '显示密钥'}
+                    >
+                      {showWebhookKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                    <button
+                      onClick={async () => {
+                        const key = webhookKey || fn.webhook_key
+                        if (key) {
+                          await navigator.clipboard.writeText(key)
+                          toast.success('密钥已复制')
+                        }
+                      }}
+                      className="p-2 text-muted-foreground hover:text-foreground hover:bg-muted rounded-lg transition-colors"
+                      title="复制密钥"
+                    >
+                      <Copy className="w-4 h-4" />
+                    </button>
+                    <button
+                      onClick={handleRegenerateWebhookKey}
+                      disabled={webhookOperating}
+                      className="p-2 text-orange-500 hover:text-orange-400 hover:bg-orange-500/10 rounded-lg transition-colors"
+                      title="重新生成密钥"
+                    >
+                      <RefreshCw className={cn('w-4 h-4', webhookOperating && 'animate-spin')} />
+                    </button>
+                  </div>
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    使用密钥进行请求验证。在请求头中添加 <code className="px-1 py-0.5 bg-muted rounded text-foreground">X-Webhook-Key</code> 或查询参数 <code className="px-1 py-0.5 bg-muted rounded text-foreground">key</code>
+                  </p>
+                </div>
+
+                {/* 使用说明 */}
+                <div className="p-4 bg-muted/50 rounded-lg">
+                  <h4 className="text-sm font-medium text-foreground mb-2">使用说明</h4>
+                  <div className="space-y-2 text-xs text-muted-foreground">
+                    <p>通过 POST 请求调用 Webhook URL，请求体将作为函数输入：</p>
+                    <pre className="p-2 bg-background rounded text-foreground font-mono overflow-x-auto">
+{`curl -X POST \\
+  -H "X-Webhook-Key: YOUR_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{"message": "hello"}' \\
+  ${webhookUrl || `${window.location.origin}/api/v1/webhook/${fn.id}`}`}
+                    </pre>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

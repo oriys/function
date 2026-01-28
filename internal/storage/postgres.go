@@ -828,7 +828,10 @@ func (s *PostgresStore) UpdateFunction(fn *domain.Function) error {
 		return err
 	}
 	// 检查是否有记录被更新
-	affected, _ := result.RowsAffected()
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
 	if affected == 0 {
 		return domain.ErrFunctionNotFound
 	}
@@ -850,7 +853,10 @@ func (s *PostgresStore) UpdateFunctionBinary(id, binary string) error {
 	if err != nil {
 		return err
 	}
-	affected, _ := result.RowsAffected()
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
 	if affected == 0 {
 		return domain.ErrFunctionNotFound
 	}
@@ -906,7 +912,10 @@ func (s *PostgresStore) DeleteFunction(id string) error {
 	if err != nil {
 		return err
 	}
-	affected, _ := result.RowsAffected()
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
 	if affected == 0 {
 		return domain.ErrFunctionNotFound
 	}
@@ -937,7 +946,10 @@ func (s *PostgresStore) UpdateFunctionPin(id string, pinned bool) error {
 	if err != nil {
 		return err
 	}
-	affected, _ := result.RowsAffected()
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
 	if affected == 0 {
 		return domain.ErrFunctionNotFound
 	}
@@ -1240,7 +1252,10 @@ func (s *PostgresStore) UpdateInvocation(inv *domain.Invocation) error {
 	if err != nil {
 		return err
 	}
-	affected, _ := result.RowsAffected()
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
 	if affected == 0 {
 		return domain.ErrInvocationNotFound
 	}
@@ -2221,7 +2236,10 @@ func (s *PostgresStore) UpdateFunctionAlias(a *domain.FunctionAlias) error {
 	if err != nil {
 		return err
 	}
-	affected, _ := result.RowsAffected()
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
 	if affected == 0 {
 		return domain.ErrFunctionNotFound
 	}
@@ -2234,7 +2252,10 @@ func (s *PostgresStore) DeleteFunctionAlias(functionID, name string) error {
 	if err != nil {
 		return err
 	}
-	affected, _ := result.RowsAffected()
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
 	if affected == 0 {
 		return domain.ErrFunctionNotFound
 	}
@@ -2345,7 +2366,10 @@ func (s *PostgresStore) UpdateLayer(l *domain.Layer) error {
 	if err != nil {
 		return err
 	}
-	affected, _ := result.RowsAffected()
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
 	if affected == 0 {
 		return errors.New("layer not found")
 	}
@@ -2358,7 +2382,10 @@ func (s *PostgresStore) DeleteLayer(id string) error {
 	if err != nil {
 		return err
 	}
-	affected, _ := result.RowsAffected()
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
 	if affected == 0 {
 		return errors.New("layer not found")
 	}
@@ -2606,7 +2633,10 @@ func (s *PostgresStore) DeleteEnvironment(id string) error {
 	if err != nil {
 		return err
 	}
-	affected, _ := result.RowsAffected()
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
 	if affected == 0 {
 		return errors.New("environment not found")
 	}
@@ -3575,16 +3605,19 @@ func (s *PostgresStore) CreateExecution(exec *domain.WorkflowExecution) error {
 	if len(definition) == 0 {
 		definition = json.RawMessage("{}")
 	}
-	pausedInput := exec.PausedInput
-	if len(pausedInput) == 0 {
-		pausedInput = nil
+	// Convert []byte to string for JSONB columns (pq driver requires string for JSONB)
+	var pausedInputStr *string
+	if len(exec.PausedInput) > 0 {
+		s := string(exec.PausedInput)
+		pausedInputStr = &s
 	}
+
 	_, err := s.db.Exec(query,
-		exec.ID, exec.WorkflowID, exec.WorkflowName, exec.WorkflowVersion, definition, exec.Status,
-		input, output, exec.Error, exec.ErrorCode, exec.CurrentState,
+		exec.ID, exec.WorkflowID, exec.WorkflowName, exec.WorkflowVersion, string(definition), exec.Status,
+		string(input), string(output), exec.Error, exec.ErrorCode, exec.CurrentState,
 		exec.StartedAt, exec.CompletedAt, exec.TimeoutAt,
 		sql.NullString{String: exec.PausedAtState, Valid: exec.PausedAtState != ""},
-		pausedInput, exec.PausedAt,
+		pausedInputStr, exec.PausedAt,
 		exec.CreatedAt, exec.UpdatedAt,
 	)
 	if err != nil {
@@ -3773,15 +3806,17 @@ func (s *PostgresStore) UpdateExecution(exec *domain.WorkflowExecution) error {
 		SET status = $2, input = $3, output = $4, error = $5, error_code = $6, current_state = $7, started_at = $8, completed_at = $9, timeout_at = $10, paused_at_state = $11, paused_input = $12, paused_at = $13, updated_at = $14
 		WHERE id = $1
 	`
-	pausedInput := exec.PausedInput
-	if len(pausedInput) == 0 {
-		pausedInput = nil
+	// Convert []byte to string for JSONB columns (pq driver requires string for JSONB)
+	var pausedInputStr *string
+	if len(exec.PausedInput) > 0 {
+		s := string(exec.PausedInput)
+		pausedInputStr = &s
 	}
 	result, err := s.db.Exec(query,
-		exec.ID, exec.Status, input, output, exec.Error, exec.ErrorCode, exec.CurrentState,
+		exec.ID, exec.Status, string(input), string(output), exec.Error, exec.ErrorCode, exec.CurrentState,
 		exec.StartedAt, exec.CompletedAt, exec.TimeoutAt,
 		sql.NullString{String: exec.PausedAtState, Valid: exec.PausedAtState != ""},
-		pausedInput, exec.PausedAt,
+		pausedInputStr, exec.PausedAt,
 		exec.UpdatedAt,
 	)
 	if err != nil {
@@ -4151,7 +4186,10 @@ func (s *PostgresStore) UpdateTemplate(template *domain.Template) error {
 	if err != nil {
 		return err
 	}
-	affected, _ := result.RowsAffected()
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
 	if affected == 0 {
 		return domain.ErrTemplateNotFound
 	}
@@ -4170,7 +4208,10 @@ func (s *PostgresStore) DeleteTemplate(id string) error {
 	if err != nil {
 		return err
 	}
-	affected, _ := result.RowsAffected()
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
 	if affected == 0 {
 		return domain.ErrTemplateNotFound
 	}

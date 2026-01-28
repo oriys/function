@@ -648,6 +648,11 @@ func (h *Handler) UpdateFunction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.CronExpression != nil {
+		// 验证 cron 表达式
+		if err := domain.ValidateCronExpression(*req.CronExpression); err != nil {
+			writeErrorWithContext(w, r, http.StatusBadRequest, "invalid cron expression")
+			return
+		}
 		fn.CronExpression = *req.CronExpression
 	}
 	if req.HTTPPath != nil {
