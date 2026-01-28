@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { Terminal, Trash2, StopCircle, Play, ChevronDown } from 'lucide-react'
+import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
 import { cn } from '../../utils'
 import type { LogEntry } from '../../types'
 
@@ -13,7 +14,7 @@ export default function LogStreamViewer({ functionId, className }: LogStreamView
   const [connected, setConnected] = useState(false)
   const [paused, setPaused] = useState(false)
   const [autoScroll, setAutoScroll] = useState(true)
-  const scrollRef = useRef<HTMLDivElement>(null)
+  const virtuosoRef = useRef<VirtuosoHandle>(null)
   const wsRef = useRef<WebSocket | null>(null)
 
   useEffect(() => {
@@ -27,8 +28,6 @@ export default function LogStreamViewer({ functionId, className }: LogStreamView
     }
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    // 假设后端运行在相同主机的 8080 端口（或者通过代理转发）
-    // 生产环境下通常是 window.location.host
     const host = window.location.hostname === 'localhost' ? 'localhost:8080' : window.location.host
     const wsUrl = `${protocol}//${host}/api/v1/console/logs/stream?function_id=${functionId}`
 
@@ -40,7 +39,7 @@ export default function LogStreamViewer({ functionId, className }: LogStreamView
     ws.onmessage = (event) => {
       try {
         const log = JSON.parse(event.data) as LogEntry
-        setLogs((prev) => [...prev.slice(-999), log]) // 最多保留 1000 条
+        setLogs((prev) => [...prev.slice(-1999), log]) // 增加到 2000 条，虚拟滚动可以处理更多
       } catch (err) {
         console.error('Failed to parse log message:', err)
       }
@@ -53,8 +52,11 @@ export default function LogStreamViewer({ functionId, className }: LogStreamView
 
   // 自动滚动到底部
   useEffect(() => {
-    if (autoScroll && scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+    if (autoScroll && logs.length > 0) {
+      virtuosoRef.current?.scrollToIndex({
+        index: logs.length - 1,
+        behavior: 'auto',
+      })
     }
   }, [logs, autoScroll])
 
@@ -99,44 +101,41 @@ export default function LogStreamViewer({ functionId, className }: LogStreamView
         </div>
       </div>
 
-      {/* 日志内容 */}
-      <div
-        ref={scrollRef}
-        className="flex-1 overflow-auto p-4 text-sm leading-relaxed"
-        onWheel={() => {
-          // 如果用户向上滚动，暂时关闭自动滚动
-          if (scrollRef.current && scrollRef.current.scrollTop + scrollRef.current.clientHeight < scrollRef.current.scrollHeight - 50) {
-            // setAutoScroll(false)
-          }
-        }}
-      >
+      {/* 日志内容 - 虚拟化渲染 */}
+      <div className="flex-1 min-h-0">
         {logs.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-slate-600 gap-2">
             <Terminal className="w-8 h-8 opacity-20" />
             <p className="text-xs">等待日志输出...</p>
           </div>
         ) : (
-          logs.map((log, i) => (
-            <div key={i} className="group flex gap-3 py-0.5 hover:bg-slate-900/50">
-              <span className="text-slate-600 flex-shrink-0 select-none">
-                {new Date(log.timestamp).toLocaleTimeString([], { hour12: false })}
-              </span>
-              <span className={cn(
-                'flex-shrink-0 w-12 font-bold text-[10px] mt-0.5 px-1 rounded flex items-center justify-center h-4',
-                log.level === 'ERROR' ? 'bg-red-500/20 text-red-400' :
-                log.level === 'WARN' ? 'bg-yellow-500/20 text-yellow-400' :
-                'bg-blue-500/20 text-blue-400'
-              )}>
-                {log.level}
-              </span>
-              <span className="text-slate-300 break-all">{log.message}</span>
-              {log.request_id && (
-                <span className="text-[10px] text-slate-600 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">
-                  ID: {log.request_id}
+          <Virtuoso
+            ref={virtuosoRef}
+            data={logs}
+            followOutput={autoScroll}
+            className="scrollbar-thin scrollbar-thumb-slate-800 scrollbar-track-transparent"
+            itemContent={(_index, log) => (
+              <div className="group flex gap-3 py-0.5 px-4 hover:bg-slate-900/50">
+                <span className="text-slate-600 flex-shrink-0 select-none text-xs">
+                  {new Date(log.timestamp).toLocaleTimeString([], { hour12: false })}
                 </span>
-              )}
-            </div>
-          ))
+                <span className={cn(
+                  'flex-shrink-0 w-12 font-bold text-[10px] mt-0.5 px-1 rounded flex items-center justify-center h-4',
+                  log.level === 'ERROR' ? 'bg-red-500/20 text-red-400' :
+                  log.level === 'WARN' ? 'bg-yellow-500/20 text-yellow-400' :
+                  'bg-blue-500/20 text-blue-400'
+                )}>
+                  {log.level}
+                </span>
+                <span className="text-slate-300 break-all text-sm">{log.message}</span>
+                {log.request_id && (
+                  <span className="text-[10px] text-slate-600 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">
+                    ID: {log.request_id}
+                  </span>
+                )}
+              </div>
+            )}
+          />
         )}
       </div>
     </div>
