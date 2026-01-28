@@ -1352,6 +1352,7 @@ func (h *Handler) InvokeFunction(w http.ResponseWriter, r *http.Request) {
 		FunctionID: fn.ID,
 		Payload:    payload,
 		Async:      false,
+		SessionKey: r.URL.Query().Get("session_key"), // 支持有状态函数的会话标识
 	}
 
 	// 记录开始时间
@@ -1469,6 +1470,7 @@ func (h *Handler) InvokeFunctionAsync(w http.ResponseWriter, r *http.Request) {
 		FunctionID: fn.ID,
 		Payload:    payload,
 		Async:      true,
+		SessionKey: r.URL.Query().Get("session_key"), // 支持有状态函数的会话标识
 	}
 
 	// 通过调度器提交异步执行请求
@@ -2184,6 +2186,128 @@ func (h *Handler) ListFunctionVersions(w http.ResponseWriter, r *http.Request) {
 		"versions": versions,
 		"total":    len(versions),
 	})
+}
+
+// PublishVersion 发布函数的新版本。
+// HTTP端点: POST /api/v1/functions/{id}/versions
+func (h *Handler) PublishVersion(w http.ResponseWriter, r *http.Request) {
+	idOrName := chi.URLParam(r, "id")
+
+	fn, err := h.store.GetFunctionByID(idOrName)
+	if err == domain.ErrFunctionNotFound {
+		fn, err = h.store.GetFunctionByName(idOrName)
+	}
+	if err == domain.ErrFunctionNotFound {
+		writeErrorWithContext(w, r, http.StatusNotFound, "function not found")
+		return
+	}
+	if err != nil {
+		writeErrorWithContext(w, r, http.StatusInternalServerError, "failed to get function: "+err.Error())
+		return
+	}
+
+	// 解析请求
+	var req struct {
+		Description  string `json:"description"`
+		PublishAlias string `json:"publish_alias"` // 可选：自动更新别名
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err.Error() != "EOF" {
+		writeErrorWithContext(w, r, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+
+	// 获取当前最新版本号
+	latestVersion, err := h.store.GetLatestFunctionVersion(fn.ID)
+	if err != nil {
+		h.logger.WithError(err).Warn("Failed to get latest version, starting from 1")
+	}
+	newVersion := latestVersion + 1
+
+	// 计算代码哈希
+	codeHash := ""
+	if fn.Code != "" {
+		hash := sha256.Sum256([]byte(fn.Code))
+		codeHash = hex.EncodeToString(hash[:])
+	}
+
+	// 创建版本快照
+	version := &domain.FunctionVersion{
+		ID:          uuid.New().String(),
+		FunctionID:  fn.ID,
+		Version:     newVersion,
+		Handler:     fn.Handler,
+		Code:        fn.Code,
+		Binary:      fn.Binary,
+		CodeHash:    codeHash,
+		Description: req.Description,
+		CreatedAt:   time.Now(),
+	}
+
+	// 保存版本
+	if err := h.store.CreateFunctionVersion(version); err != nil {
+		h.logger.WithError(err).Error("Failed to create version")
+		writeErrorWithContext(w, r, http.StatusInternalServerError, "failed to create version: "+err.Error())
+		return
+	}
+
+	// 创建或更新 latest 别名
+	latestAlias, err := h.store.GetFunctionAlias(fn.ID, "latest")
+	if err != nil {
+		// 创建 latest 别名
+		latestAlias = &domain.FunctionAlias{
+			ID:          uuid.New().String(),
+			FunctionID:  fn.ID,
+			Name:        "latest",
+			Description: "Auto-updated to latest version",
+			RoutingConfig: domain.RoutingConfig{
+				Weights: []domain.VersionWeight{{Version: newVersion, Weight: 100}},
+			},
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
+		}
+		if err := h.store.CreateFunctionAlias(latestAlias); err != nil {
+			h.logger.WithError(err).Warn("Failed to create latest alias")
+		}
+	} else {
+		// 更新 latest 别名
+		latestAlias.RoutingConfig = domain.RoutingConfig{
+			Weights: []domain.VersionWeight{{Version: newVersion, Weight: 100}},
+		}
+		latestAlias.UpdatedAt = time.Now()
+		if err := h.store.UpdateFunctionAlias(latestAlias); err != nil {
+			h.logger.WithError(err).Warn("Failed to update latest alias")
+		}
+	}
+
+	// 如果指定了其他别名，也更新
+	if req.PublishAlias != "" && req.PublishAlias != "latest" {
+		alias, err := h.store.GetFunctionAlias(fn.ID, req.PublishAlias)
+		if err != nil {
+			// 创建新别名
+			alias = &domain.FunctionAlias{
+				ID:          uuid.New().String(),
+				FunctionID:  fn.ID,
+				Name:        req.PublishAlias,
+				Description: "Created during version publish",
+				RoutingConfig: domain.RoutingConfig{
+					Weights: []domain.VersionWeight{{Version: newVersion, Weight: 100}},
+				},
+				CreatedAt: time.Now(),
+				UpdatedAt: time.Now(),
+			}
+			h.store.CreateFunctionAlias(alias)
+		} else {
+			// 更新别名
+			alias.RoutingConfig = domain.RoutingConfig{
+				Weights: []domain.VersionWeight{{Version: newVersion, Weight: 100}},
+			}
+			alias.UpdatedAt = time.Now()
+			h.store.UpdateFunctionAlias(alias)
+		}
+	}
+
+	h.logInfo(r, "PublishVersion", "版本发布成功", logrus.Fields{"function": fn.Name, "version": newVersion})
+	writeJSON(w, http.StatusCreated, version)
 }
 
 // GetFunctionVersion 获取函数的指定版本。

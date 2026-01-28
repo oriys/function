@@ -76,6 +76,46 @@ type Metrics struct {
 
 	// SchedulerWorkers 调度器工作线程数量
 	SchedulerWorkers prometheus.Gauge
+
+	// ========== 状态操作相关指标 ==========
+
+	// StateOperationsTotal 状态操作总次数计数器
+	// 标签: function_id, operation, scope, success
+	StateOperationsTotal *prometheus.CounterVec
+
+	// StateOperationDuration 状态操作耗时直方图（单位：毫秒）
+	// 标签: function_id, operation
+	StateOperationDuration *prometheus.HistogramVec
+
+	// SessionRouteTotal 会话路由次数计数器
+	// 标签: function_id, result (hit/miss/new)
+	SessionRouteTotal *prometheus.CounterVec
+
+	// ActiveSessionsGauge 活跃会话数
+	// 标签: function_id
+	ActiveSessionsGauge *prometheus.GaugeVec
+
+	// StateSizeBytes 状态数据大小（字节）
+	// 标签: function_id, scope
+	StateSizeBytes *prometheus.GaugeVec
+
+	// ========== 快照相关指标 ==========
+
+	// SnapshotsTotal 快照总数
+	// 标签: status (ready/building/failed/expired)
+	SnapshotsTotal *prometheus.GaugeVec
+
+	// SnapshotBuildDuration 快照构建耗时直方图（单位：毫秒）
+	// 标签: runtime, success
+	SnapshotBuildDuration *prometheus.HistogramVec
+
+	// SnapshotRestoreDuration 快照恢复耗时直方图（单位：毫秒）
+	// 标签: runtime
+	SnapshotRestoreDuration *prometheus.HistogramVec
+
+	// SnapshotSizeBytes 快照文件大小
+	// 标签: function_id
+	SnapshotSizeBytes *prometheus.GaugeVec
 }
 
 // NewMetrics 创建并注册一组 Prometheus 指标。
@@ -193,6 +233,83 @@ func NewMetrics(namespace string) *Metrics {
 				Help:      "Number of scheduler workers",
 			},
 		),
+		// 状态操作指标
+		StateOperationsTotal: promauto.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: namespace,
+				Name:      "state_operations_total",
+				Help:      "Total number of state operations",
+			},
+			[]string{"function_id", "operation", "scope", "success"},
+		),
+		StateOperationDuration: promauto.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Namespace: namespace,
+				Name:      "state_operation_duration_ms",
+				Help:      "State operation duration in milliseconds",
+				Buckets:   []float64{0.5, 1, 2, 5, 10, 25, 50, 100},
+			},
+			[]string{"function_id", "operation"},
+		),
+		SessionRouteTotal: promauto.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: namespace,
+				Name:      "session_route_total",
+				Help:      "Total number of session routing operations",
+			},
+			[]string{"function_id", "result"},
+		),
+		ActiveSessionsGauge: promauto.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Namespace: namespace,
+				Name:      "active_sessions",
+				Help:      "Number of active sessions",
+			},
+			[]string{"function_id"},
+		),
+		StateSizeBytes: promauto.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Namespace: namespace,
+				Name:      "state_size_bytes",
+				Help:      "Total size of state data in bytes",
+			},
+			[]string{"function_id", "scope"},
+		),
+		// 快照指标
+		SnapshotsTotal: promauto.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Namespace: namespace,
+				Name:      "snapshots_total",
+				Help:      "Total number of snapshots by status",
+			},
+			[]string{"status"},
+		),
+		SnapshotBuildDuration: promauto.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Namespace: namespace,
+				Name:      "snapshot_build_duration_ms",
+				Help:      "Snapshot build duration in milliseconds",
+				Buckets:   []float64{1000, 2000, 5000, 10000, 30000, 60000},
+			},
+			[]string{"runtime", "success"},
+		),
+		SnapshotRestoreDuration: promauto.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Namespace: namespace,
+				Name:      "snapshot_restore_duration_ms",
+				Help:      "Snapshot restore duration in milliseconds",
+				Buckets:   []float64{5, 10, 25, 50, 100, 250, 500},
+			},
+			[]string{"runtime"},
+		),
+		SnapshotSizeBytes: promauto.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Namespace: namespace,
+				Name:      "snapshot_size_bytes",
+				Help:      "Snapshot file size in bytes",
+			},
+			[]string{"function_id"},
+		),
 	}
 }
 
@@ -231,4 +348,57 @@ func (m *Metrics) RecordVMBoot(runtime string, durationMs float64, fromSnapshot 
 		snapshotStr = "true"
 	}
 	m.VMBootDuration.WithLabelValues(runtime, snapshotStr).Observe(durationMs)
+}
+
+// RecordStateOperation 记录一次状态操作的统计信息。
+func (m *Metrics) RecordStateOperation(functionID, operation, scope string, success bool, durationMs float64) {
+	successStr := "true"
+	if !success {
+		successStr = "false"
+	}
+	m.StateOperationsTotal.WithLabelValues(functionID, operation, scope, successStr).Inc()
+	m.StateOperationDuration.WithLabelValues(functionID, operation).Observe(durationMs)
+}
+
+// RecordSessionRoute 记录会话路由结果。
+// result: "hit" (缓存命中), "miss" (缓存未命中), "new" (新会话)
+func (m *Metrics) RecordSessionRoute(functionID, result string) {
+	m.SessionRouteTotal.WithLabelValues(functionID, result).Inc()
+}
+
+// UpdateActiveSessions 更新活跃会话数。
+func (m *Metrics) UpdateActiveSessions(functionID string, count int) {
+	m.ActiveSessionsGauge.WithLabelValues(functionID).Set(float64(count))
+}
+
+// UpdateStateSize 更新状态数据大小。
+func (m *Metrics) UpdateStateSize(functionID, scope string, sizeBytes int64) {
+	m.StateSizeBytes.WithLabelValues(functionID, scope).Set(float64(sizeBytes))
+}
+
+// UpdateSnapshotStats 更新快照统计。
+func (m *Metrics) UpdateSnapshotStats(ready, building, failed, expired int) {
+	m.SnapshotsTotal.WithLabelValues("ready").Set(float64(ready))
+	m.SnapshotsTotal.WithLabelValues("building").Set(float64(building))
+	m.SnapshotsTotal.WithLabelValues("failed").Set(float64(failed))
+	m.SnapshotsTotal.WithLabelValues("expired").Set(float64(expired))
+}
+
+// RecordSnapshotBuild 记录快照构建耗时。
+func (m *Metrics) RecordSnapshotBuild(runtime string, durationMs float64, success bool) {
+	successStr := "true"
+	if !success {
+		successStr = "false"
+	}
+	m.SnapshotBuildDuration.WithLabelValues(runtime, successStr).Observe(durationMs)
+}
+
+// RecordSnapshotRestore 记录快照恢复耗时。
+func (m *Metrics) RecordSnapshotRestore(runtime string, durationMs float64) {
+	m.SnapshotRestoreDuration.WithLabelValues(runtime).Observe(durationMs)
+}
+
+// UpdateSnapshotSize 更新快照大小。
+func (m *Metrics) UpdateSnapshotSize(functionID string, sizeBytes int64) {
+	m.SnapshotSizeBytes.WithLabelValues(functionID).Set(float64(sizeBytes))
 }

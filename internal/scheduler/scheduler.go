@@ -24,6 +24,7 @@ import (
 	"github.com/oriys/nimbus/internal/domain"
 	fc "github.com/oriys/nimbus/internal/firecracker"
 	"github.com/oriys/nimbus/internal/metrics"
+	"github.com/oriys/nimbus/internal/snapshot"
 	"github.com/oriys/nimbus/internal/storage"
 	"github.com/oriys/nimbus/internal/telemetry"
 	"github.com/oriys/nimbus/internal/vmpool"
@@ -42,6 +43,8 @@ type Scheduler struct {
 	store     *storage.PostgresStore   // PostgreSQL 存储，用于持久化函数和调用记录
 	redis     *storage.RedisStore      // Redis 存储，用于异步调用的队列溢出处理
 	pool      *vmpool.Pool             // 虚拟机池，管理 Firecracker 虚拟机资源
+	router    *TrafficRouter           // 流量路由器，用于版本选择和流量分配
+	snapshotMgr *snapshot.Manager      // 快照管理器，用于函数级快照
 	metrics   *metrics.Metrics         // 指标收集器，用于记录调度器性能指标
 	logger    *logrus.Logger           // 日志记录器
 
@@ -58,6 +61,7 @@ type Scheduler struct {
 type workItem struct {
 	invocation *domain.Invocation              // 调用记录，包含调用ID、输入参数等
 	function   *domain.Function                // 函数定义，包含运行时、处理器、超时配置等
+	version    *domain.FunctionVersion         // 要执行的版本（如果指定了版本/别名）
 	resultCh   chan *domain.InvokeResponse     // 结果通道，用于同步调用时返回执行结果；异步调用时为 nil
 }
 
@@ -97,6 +101,7 @@ func NewScheduler(
 		store:     store,
 		redis:     redis,
 		pool:      pool,
+		router:    NewTrafficRouter(store, logger),
 		metrics:   m,
 		logger:    logger,
 		workQueue: make(chan *workItem, cfg.QueueSize), // 创建带缓冲的工作队列
@@ -176,9 +181,10 @@ func (s *Scheduler) Stop() error {
 //
 // 调用流程：
 //  1. 从存储中获取函数定义
-//  2. 创建调用记录并持久化
-//  3. 将工作项提交到工作队列
-//  4. 等待执行结果或超时
+//  2. 解析版本（根据 alias/version 参数或默认 latest）
+//  3. 创建调用记录并持久化
+//  4. 将工作项提交到工作队列
+//  5. 等待执行结果或超时
 //
 // 参数:
 //   - req: 调用请求，包含函数ID和输入负载
@@ -193,9 +199,18 @@ func (s *Scheduler) Invoke(req *domain.InvokeRequest) (*domain.InvokeResponse, e
 		return nil, err
 	}
 
+	// 解析版本
+	version, aliasUsed, versionData, err := s.resolveVersion(fn, req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve version: %w", err)
+	}
+
 	// 创建调用记录，用于追踪调用状态和持久化
 	inv := domain.NewInvocation(fn.ID, fn.Name, domain.TriggerHTTP, req.Payload)
 	inv.ID = uuid.New().String()
+	inv.Version = version
+	inv.AliasUsed = aliasUsed
+	inv.SessionKey = req.SessionKey // 设置会话标识（有状态函数）
 
 	// 持久化调用记录
 	if err := s.store.CreateInvocation(inv); err != nil {
@@ -207,6 +222,7 @@ func (s *Scheduler) Invoke(req *domain.InvokeRequest) (*domain.InvokeResponse, e
 	item := &workItem{
 		invocation: inv,
 		function:   fn,
+		version:    versionData,
 		resultCh:   resultCh,
 	}
 
@@ -238,6 +254,9 @@ func (s *Scheduler) Invoke(req *domain.InvokeRequest) (*domain.InvokeResponse, e
 			RequestID:  inv.ID,
 			StatusCode: 504, // Gateway Timeout
 			Error:      "function execution timed out",
+			Version:    version,
+			AliasUsed:  aliasUsed,
+			SessionKey: req.SessionKey,
 		}, nil
 	}
 }
@@ -247,9 +266,10 @@ func (s *Scheduler) Invoke(req *domain.InvokeRequest) (*domain.InvokeResponse, e
 //
 // 调用流程：
 //  1. 从存储中获取函数定义
-//  2. 创建调用记录并持久化
-//  3. 将工作项提交到工作队列（如果队列满则推送到Redis）
-//  4. 立即返回调用ID
+//  2. 解析版本（根据 alias/version 参数或默认 latest）
+//  3. 创建调用记录并持久化
+//  4. 将工作项提交到工作队列（如果队列满则推送到Redis）
+//  5. 立即返回调用ID
 //
 // 参数:
 //   - req: 调用请求，包含函数ID和输入负载
@@ -264,9 +284,18 @@ func (s *Scheduler) InvokeAsync(req *domain.InvokeRequest) (string, error) {
 		return "", err
 	}
 
+	// 解析版本
+	version, aliasUsed, versionData, err := s.resolveVersion(fn, req)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve version: %w", err)
+	}
+
 	// 创建调用记录
 	inv := domain.NewInvocation(fn.ID, fn.Name, domain.TriggerHTTP, req.Payload)
 	inv.ID = uuid.New().String()
+	inv.Version = version
+	inv.AliasUsed = aliasUsed
+	inv.SessionKey = req.SessionKey // 设置会话标识（有状态函数）
 
 	// 持久化调用记录
 	if err := s.store.CreateInvocation(inv); err != nil {
@@ -277,6 +306,7 @@ func (s *Scheduler) InvokeAsync(req *domain.InvokeRequest) (string, error) {
 	item := &workItem{
 		invocation: inv,
 		function:   fn,
+		version:    versionData,
 		resultCh:   nil, // 异步调用不需要等待结果
 	}
 
@@ -292,6 +322,90 @@ func (s *Scheduler) InvokeAsync(req *domain.InvokeRequest) (string, error) {
 			return "", fmt.Errorf("work queue is full and failed to push to redis: %w", err)
 		}
 		return inv.ID, nil
+	}
+}
+
+// resolveVersion 解析要执行的版本
+// 优先级：显式指定版本 > 别名 > 默认 latest
+func (s *Scheduler) resolveVersion(fn *domain.Function, req *domain.InvokeRequest) (version int, alias string, versionData *domain.FunctionVersion, err error) {
+	ctx := context.Background()
+
+	// 优先使用显式指定的版本号
+	if req.Version > 0 {
+		versionData, err = s.store.GetFunctionVersion(fn.ID, req.Version)
+		if err != nil {
+			return 0, "", nil, fmt.Errorf("version %d not found: %w", req.Version, err)
+		}
+		return req.Version, "", versionData, nil
+	}
+
+	// 使用别名解析版本
+	aliasName := req.Alias
+	if aliasName == "" {
+		aliasName = "latest" // 默认使用 latest 别名
+	}
+
+	// 尝试通过路由器选择版本
+	version, err = s.router.SelectVersion(ctx, fn.ID, aliasName)
+	if err != nil {
+		// 如果别名不存在，回退到函数当前版本
+		s.logger.WithFields(logrus.Fields{
+			"function_id": fn.ID,
+			"alias":       aliasName,
+			"error":       err.Error(),
+		}).Debug("Alias not found, falling back to current function version")
+
+		// 使用函数当前的代码（不从版本表加载）
+		return fn.Version, "", nil, nil
+	}
+
+	// 加载版本数据
+	versionData, err = s.store.GetFunctionVersion(fn.ID, version)
+	if err != nil {
+		return 0, "", nil, fmt.Errorf("failed to load version %d: %w", version, err)
+	}
+
+	return version, aliasName, versionData, nil
+}
+
+// Router 返回流量路由器实例
+func (s *Scheduler) Router() *TrafficRouter {
+	return s.router
+}
+
+// SetSnapshotManager 设置快照管理器
+func (s *Scheduler) SetSnapshotManager(mgr *snapshot.Manager) {
+	s.snapshotMgr = mgr
+}
+
+// SnapshotManager 返回快照管理器实例
+func (s *Scheduler) SnapshotManager() *snapshot.Manager {
+	return s.snapshotMgr
+}
+
+// OnFunctionDeployed 函数部署后触发快照构建
+func (s *Scheduler) OnFunctionDeployed(ctx context.Context, fn *domain.Function, version int) {
+	if s.snapshotMgr != nil {
+		// 异步构建快照
+		go func() {
+			if err := s.snapshotMgr.RequestBuild(fn, version); err != nil {
+				s.logger.WithError(err).WithFields(logrus.Fields{
+					"function_id": fn.ID,
+					"version":     version,
+				}).Warn("Failed to queue snapshot build")
+			}
+		}()
+	}
+}
+
+// OnFunctionUpdated 函数更新后使旧快照失效
+func (s *Scheduler) OnFunctionUpdated(ctx context.Context, fn *domain.Function) {
+	if s.snapshotMgr != nil {
+		go func() {
+			if err := s.snapshotMgr.InvalidateSnapshots(ctx, fn.ID); err != nil {
+				s.logger.WithError(err).WithField("function_id", fn.ID).Warn("Failed to invalidate snapshots")
+			}
+		}()
 	}
 }
 
@@ -338,6 +452,8 @@ func (w *worker) process(item *workItem) {
 			attribute.String("function.name", fn.Name),
 			attribute.String("function.runtime", string(fn.Runtime)),
 			attribute.String("invocation.id", inv.ID),
+			attribute.Int("invocation.version", inv.Version),
+			attribute.String("invocation.alias", inv.AliasUsed),
 			attribute.Int("worker.id", w.id),
 		),
 	)
@@ -349,6 +465,8 @@ func (w *worker) process(item *workItem) {
 		"invocation_id": inv.ID,
 		"function_id":   fn.ID,
 		"function_name": fn.Name,
+		"version":       inv.Version,
+		"alias":         inv.AliasUsed,
 	})
 	logger = telemetry.EntryWithTraceContext(ctx, logger)
 
@@ -416,15 +534,33 @@ func (w *worker) process(item *workItem) {
 	}
 
 	// 构建函数初始化负载
-	initPayload := &fc.InitPayload{
-		FunctionID:    fn.ID,
-		Handler:       fn.Handler,       // 函数入口点
-		Code:          fn.Code,          // 函数代码
-		Runtime:       string(fn.Runtime),
-		EnvVars:       fn.EnvVars,       // 环境变量
-		MemoryLimitMB: fn.MemoryMB,      // 内存限制
-		TimeoutSec:    fn.TimeoutSec,    // 超时配置
-		Layers:        layerInfos,       // 函数层
+	// 如果指定了版本，使用版本数据；否则使用函数当前代码
+	var initPayload *fc.InitPayload
+	if item.version != nil {
+		// 使用指定版本的代码和配置
+		initPayload = &fc.InitPayload{
+			FunctionID:    fn.ID,
+			Handler:       item.version.Handler,
+			Code:          item.version.Code,
+			Runtime:       string(fn.Runtime),
+			EnvVars:       fn.EnvVars, // 环境变量使用函数级别的
+			MemoryLimitMB: fn.MemoryMB,
+			TimeoutSec:    fn.TimeoutSec,
+			Layers:        layerInfos,
+		}
+		logger.WithField("version", item.version.Version).Debug("Using version-specific code")
+	} else {
+		// 使用函数当前代码
+		initPayload = &fc.InitPayload{
+			FunctionID:    fn.ID,
+			Handler:       fn.Handler,
+			Code:          fn.Code,
+			Runtime:       string(fn.Runtime),
+			EnvVars:       fn.EnvVars,
+			MemoryLimitMB: fn.MemoryMB,
+			TimeoutSec:    fn.TimeoutSec,
+			Layers:        layerInfos,
+		}
 	}
 
 	// 在虚拟机中初始化函数运行环境
@@ -521,6 +657,9 @@ func (w *worker) process(item *workItem) {
 			DurationMs:   inv.DurationMs,
 			ColdStart:    coldStart,
 			BilledTimeMs: inv.BilledTimeMs,
+			Version:      inv.Version,
+			AliasUsed:    inv.AliasUsed,
+			SessionKey:   inv.SessionKey,
 		}
 	}
 
@@ -564,12 +703,15 @@ func (w *worker) fail(item *workItem, errMsg string, statusCode int, errorType s
 	// 如果是同步调用，通过结果通道返回错误响应
 	if item.resultCh != nil {
 		item.resultCh <- &domain.InvokeResponse{
-			RequestID:  item.invocation.ID,
-			StatusCode: statusCode,
-			Error:      errMsg,
-			DurationMs: item.invocation.DurationMs,
-			ColdStart:  item.invocation.ColdStart,
+			RequestID:    item.invocation.ID,
+			StatusCode:   statusCode,
+			Error:        errMsg,
+			DurationMs:   item.invocation.DurationMs,
+			ColdStart:    item.invocation.ColdStart,
 			BilledTimeMs: item.invocation.BilledTimeMs,
+			Version:      item.invocation.Version,
+			AliasUsed:    item.invocation.AliasUsed,
+			SessionKey:   item.invocation.SessionKey,
 		}
 	}
 }

@@ -62,6 +62,12 @@ type Invocation struct {
 	ColdStart bool `json:"cold_start"`
 	// VMID 是执行本次调用的虚拟机 ID
 	VMID string `json:"vm_id,omitempty"`
+	// Version 是实际执行的函数版本号
+	Version int `json:"version,omitempty"`
+	// AliasUsed 是调用时使用的别名（如果有）
+	AliasUsed string `json:"alias_used,omitempty"`
+	// SessionKey 是会话标识（用于有状态函数）
+	SessionKey string `json:"session_key,omitempty"`
 	// StartedAt 是调用开始执行的时间
 	StartedAt *time.Time `json:"started_at,omitempty"`
 	// CompletedAt 是调用执行完成的时间

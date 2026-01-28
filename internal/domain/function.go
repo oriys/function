@@ -180,6 +180,8 @@ type Function struct {
 	WebhookKey string `json:"webhook_key,omitempty"`
 	// LastDeployedAt 是最后一次成功部署的时间
 	LastDeployedAt *time.Time `json:"last_deployed_at,omitempty"`
+	// StateConfig 是状态配置（可选），用于启用有状态函数功能
+	StateConfig *StateConfig `json:"state_config,omitempty"`
 	// CreatedAt 是函数的创建时间
 	CreatedAt time.Time `json:"created_at"`
 	// UpdatedAt 是函数的最后更新时间
@@ -418,6 +420,12 @@ type InvokeRequest struct {
 	Async bool `json:"async,omitempty"`
 	// Debug 表示是否开启调试模式
 	Debug bool `json:"debug,omitempty"`
+	// Alias 指定使用的别名（如 "prod", "canary"），为空则使用 "latest"
+	Alias string `json:"alias,omitempty"`
+	// Version 指定使用的版本号，优先级高于 Alias
+	Version int `json:"version,omitempty"`
+	// SessionKey 会话标识，用于有状态函数的状态隔离和会话亲和性路由
+	SessionKey string `json:"session_key,omitempty"`
 }
 
 // InvokeResponse 表示函数调用响应结构体。
@@ -437,6 +445,12 @@ type InvokeResponse struct {
 	ColdStart bool `json:"cold_start"`
 	// BilledTimeMs 是计费时长（单位：毫秒），按最小计费单位向上取整
 	BilledTimeMs int64 `json:"billed_time_ms"`
+	// Version 是实际执行的函数版本号
+	Version int `json:"version,omitempty"`
+	// AliasUsed 是调用时使用的别名（如果有）
+	AliasUsed string `json:"alias_used,omitempty"`
+	// SessionKey 是本次调用使用的会话标识（如果有）
+	SessionKey string `json:"session_key,omitempty"`
 }
 
 // ==================== 版本管理相关类型 ====================
@@ -690,3 +704,65 @@ const (
 	// DLQStatusDiscarded 已丢弃
 	DLQStatusDiscarded = "discarded"
 )
+
+// ==================== 有状态函数相关类型 ====================
+
+// StateConfig 状态配置，用于启用和配置函数的状态管理功能。
+// 当启用状态功能时，函数可以在多次调用间保持状态数据。
+type StateConfig struct {
+	// Enabled 是否启用状态功能
+	Enabled bool `json:"enabled"`
+	// DefaultTTL 默认 TTL（秒），0 表示永不过期
+	DefaultTTL int `json:"default_ttl,omitempty"`
+	// MaxStateSize 最大状态大小（字节），默认 64KB
+	MaxStateSize int `json:"max_state_size,omitempty"`
+	// MaxKeys 最大 key 数量（每个 session），默认 100
+	MaxKeys int `json:"max_keys,omitempty"`
+	// SessionAffinity 是否启用会话亲和性
+	// 启用后，相同 session_key 的请求会路由到同一 VM
+	SessionAffinity bool `json:"session_affinity,omitempty"`
+	// SessionTimeout 会话超时（秒），默认 3600
+	SessionTimeout int `json:"session_timeout,omitempty"`
+}
+
+// DefaultStateConfig 返回默认的状态配置
+func DefaultStateConfig() *StateConfig {
+	return &StateConfig{
+		Enabled:         false,
+		DefaultTTL:      3600,  // 1小时
+		MaxStateSize:    65536, // 64KB
+		MaxKeys:         100,
+		SessionAffinity: false,
+		SessionTimeout:  3600, // 1小时
+	}
+}
+
+// SessionInfo 会话信息，用于追踪有状态函数的会话
+type SessionInfo struct {
+	// SessionKey 会话唯一标识
+	SessionKey string `json:"session_key"`
+	// FunctionID 关联的函数 ID
+	FunctionID string `json:"function_id"`
+	// VMID 绑定的虚拟机 ID
+	VMID string `json:"vm_id,omitempty"`
+	// StateKeys 会话中的状态 key 列表
+	StateKeys []string `json:"state_keys,omitempty"`
+	// TotalSize 状态数据总大小（字节）
+	TotalSize int64 `json:"total_size"`
+	// CreatedAt 会话创建时间
+	CreatedAt time.Time `json:"created_at"`
+	// LastAccessAt 最后访问时间
+	LastAccessAt time.Time `json:"last_access_at"`
+	// ExpiresAt 会话过期时间
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+}
+
+// StateKeyInfo 单个状态 key 的信息
+type StateKeyInfo struct {
+	// Key 键名
+	Key string `json:"key"`
+	// Size 数据大小（字节）
+	Size int64 `json:"size"`
+	// TTL 剩余生存时间（秒），-1 表示永不过期
+	TTL int `json:"ttl"`
+}

@@ -122,4 +122,24 @@ var (
 	ErrInvalidTemplateCategory = errors.New("invalid template category")
 	// ErrInvalidTemplateID 表示模板 ID 无效
 	ErrInvalidTemplateID = errors.New("invalid template id")
+
+	// ========== 版本管理相关错误 ==========
+
+	// ErrVersionNotFound 表示请求的版本不存在
+	ErrVersionNotFound = errors.New("version not found")
+	// ErrVersionInUse 表示版本正在被别名使用，无法删除
+	ErrVersionInUse = errors.New("version is in use by an alias")
+	// ErrInvalidVersion 表示版本号无效
+	ErrInvalidVersion = errors.New("invalid version number")
+
+	// ========== 别名管理相关错误 ==========
+
+	// ErrAliasNotFound 表示请求的别名不存在
+	ErrAliasNotFound = errors.New("alias not found")
+	// ErrAliasExists 表示别名已存在
+	ErrAliasExists = errors.New("alias already exists")
+	// ErrInvalidWeights 表示流量权重配置无效（权重总和必须为100）
+	ErrInvalidWeights = errors.New("weights must sum to 100")
+	// ErrCannotDeleteLatest 表示无法删除 latest 别名
+	ErrCannotDeleteLatest = errors.New("cannot delete 'latest' alias")
 )

@@ -20,6 +20,10 @@ type RouterConfig struct {
 	Handler *Handler
 	// WorkflowHandler 工作流处理器（可选）
 	WorkflowHandler *WorkflowHandler
+	// SnapshotHandler 快照处理器（可选）
+	SnapshotHandler *SnapshotHandler
+	// StateHandler 状态处理器（可选）
+	StateHandler *StateHandler
 	// Logger 日志记录器
 	Logger *logrus.Logger
 	// WebFS 前端静态文件系统（可选，用于嵌入前端资源）
@@ -153,6 +157,8 @@ func NewRouter(cfg *RouterConfig) *chi.Mux {
 
 				// 版本管理路由组
 				r.Route("/versions", func(r chi.Router) {
+					// POST /api/v1/functions/{id}/versions - 发布新版本
+					r.Post("/", h.PublishVersion)
 					// GET /api/v1/functions/{id}/versions - 获取函数版本列表
 					r.Get("/", h.ListFunctionVersions)
 					// GET /api/v1/functions/{id}/versions/{version} - 获取指定版本
@@ -354,6 +360,16 @@ func NewRouter(cfg *RouterConfig) *chi.Mux {
 			// GET /api/v1/dependencies/graph - 获取依赖关系图
 			r.Get("/graph", h.GetDependencyGraph)
 		})
+
+		// 快照管理路由组
+		if cfg.SnapshotHandler != nil {
+			cfg.SnapshotHandler.RegisterRoutes(r)
+		}
+
+		// 状态管理路由组（有状态函数）
+		if cfg.StateHandler != nil {
+			cfg.StateHandler.RegisterRoutes(r)
+		}
 
 		// 工作流管理路由组
 		if cfg.WorkflowHandler != nil {

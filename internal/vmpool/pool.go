@@ -487,6 +487,58 @@ type PoolStats struct {
 	MaxVMs   int `json:"max_vms"`   // 最大虚拟机数量
 }
 
+// IsVMAlive 检查指定 VM 是否存活。
+// 用于会话路由器检查会话绑定的 VM 是否仍可用。
+func (p *Pool) IsVMAlive(vmID string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	for _, pool := range p.pools {
+		pool.mu.Lock()
+		if _, ok := pool.allVMs[vmID]; ok {
+			pool.mu.Unlock()
+			return true
+		}
+		pool.mu.Unlock()
+	}
+	return false
+}
+
+// GetVMByID 根据 VM ID 获取 PooledVM（如果存在）。
+// 用于会话亲和性路由时获取特定的 VM。
+func (p *Pool) GetVMByID(vmID string) (*PooledVM, string, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	for runtime, pool := range p.pools {
+		pool.mu.Lock()
+		if pvm, ok := pool.allVMs[vmID]; ok {
+			pool.mu.Unlock()
+			return pvm, runtime, true
+		}
+		pool.mu.Unlock()
+	}
+	return nil, "", false
+}
+
+// GetAllVMIDs 获取指定运行时的所有 VM ID 列表。
+// 用于会话路由器更新一致性哈希环。
+func (p *Pool) GetAllVMIDs(runtime string) []string {
+	pool, ok := p.pools[runtime]
+	if !ok {
+		return nil
+	}
+
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+
+	vmIDs := make([]string, 0, len(pool.allVMs))
+	for vmID := range pool.allVMs {
+		vmIDs = append(vmIDs, vmID)
+	}
+	return vmIDs
+}
+
 // SnapshotPool 是基于快照的虚拟机池。
 // 通过预先创建的快照快速恢复虚拟机，实现更快的冷启动。
 type SnapshotPool struct {

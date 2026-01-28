@@ -33,16 +33,18 @@ import (
 
 // 常量定义
 const (
-	VsockPort       = 9999 // vsock 监听端口，用于与宿主机通信
-	MessageTypeInit = 1    // 消息类型：初始化
-	MessageTypeExec = 2    // 消息类型：执行函数
-	MessageTypeResp = 3    // 消息类型：响应
-	MessageTypePing = 4    // 消息类型：心跳检测
-	MessageTypePong = 5    // 消息类型：心跳响应
-	MessageTypeDebug = 6   // 消息类型：调试
+	VsockPort        = 9999 // vsock 监听端口，用于与宿主机通信
+	MessageTypeInit  = 1    // 消息类型：初始化
+	MessageTypeExec  = 2    // 消息类型：执行函数
+	MessageTypeResp  = 3    // 消息类型：响应
+	MessageTypePing  = 4    // 消息类型：心跳检测
+	MessageTypePong  = 5    // 消息类型：心跳响应
+	MessageTypeDebug = 6    // 消息类型：调试
+	MessageTypeState = 7    // 消息类型：状态操作
 
 	FunctionDir = "/var/function" // 函数代码存储目录
 	LayersDir   = "/opt/layers"   // 层内容存储目录
+	StateAPIPort = 9998           // 状态 API 监听端口（HTTP）
 )
 
 // Message 定义 Agent 与宿主机之间的通信消息格式
@@ -64,6 +66,8 @@ type InitPayload struct {
 	MemoryLimitMB int               `json:"memory_limit_mb"`          // 内存限制（MB）
 	TimeoutSec    int               `json:"timeout_sec"`              // 执行超时时间（秒）
 	Layers        []LayerInfo       `json:"layers,omitempty"`         // 函数层列表（可选）
+	StateEnabled  bool              `json:"state_enabled,omitempty"`  // 是否启用状态功能
+	SessionKey    string            `json:"session_key,omitempty"`    // 会话标识（有状态函数）
 }
 
 // LayerInfo 表示函数层的信息
@@ -77,7 +81,27 @@ type LayerInfo struct {
 
 // ExecPayload 定义函数执行请求的载荷结构
 type ExecPayload struct {
-	Input json.RawMessage `json:"input"` // 函数输入参数，作为 JSON 传递给函数
+	Input      json.RawMessage `json:"input"`                  // 函数输入参数，作为 JSON 传递给函数
+	SessionKey string          `json:"session_key,omitempty"`  // 会话标识（有状态函数）
+}
+
+// StatePayload 定义状态操作请求的载荷结构
+type StatePayload struct {
+	Operation string          `json:"operation"`           // 操作类型: get, set, delete, incr, exists, keys, expire
+	Scope     string          `json:"scope"`               // 作用域: session, function, invocation
+	Key       string          `json:"key"`                 // 状态键
+	Value     json.RawMessage `json:"value,omitempty"`     // 状态值（set 时使用）
+	TTL       int             `json:"ttl,omitempty"`       // 过期时间（秒）
+	Delta     int64           `json:"delta,omitempty"`     // 增量（incr 时使用）
+	Version   int64           `json:"version,omitempty"`   // 版本号（乐观锁）
+}
+
+// StateResponsePayload 定义状态操作响应的载荷结构
+type StateResponsePayload struct {
+	Success bool            `json:"success"`
+	Value   json.RawMessage `json:"value,omitempty"`
+	Version int64           `json:"version,omitempty"`
+	Error   string          `json:"error,omitempty"`
 }
 
 // ResponsePayload 定义函数执行响应的载荷结构
@@ -96,6 +120,8 @@ type Agent struct {
 	config       *InitPayload  // 当前函数配置
 	runtime      Runtime       // 当前使用的运行时
 	debugManager *DebugManager // 调试管理器
+	stateConn    net.Conn      // 状态操作连接（与宿主机通信）
+	sessionKey   string        // 当前会话标识
 }
 
 // Runtime 定义运行时接口

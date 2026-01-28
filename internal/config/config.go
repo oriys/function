@@ -42,6 +42,10 @@ type Config struct {
 	Telemetry TelemetryConfig `yaml:"telemetry"`
 	// Workflow 工作流引擎配置
 	Workflow WorkflowConfig `yaml:"workflow"`
+	// Snapshot 函数级快照配置
+	Snapshot SnapshotConfig `yaml:"snapshot"`
+	// State 有状态函数配置
+	State StateConfig `yaml:"state"`
 }
 
 // RuntimeMode 运行时模式配置结构体。
@@ -329,6 +333,48 @@ type WorkflowConfig struct {
 	RecoveryInterval time.Duration `yaml:"recovery_interval"`
 }
 
+// SnapshotConfig 函数级快照配置结构体。
+// 定义了函数快照的存储、构建和清理策略。
+type SnapshotConfig struct {
+	// Enabled 是否启用函数级快照
+	Enabled bool `yaml:"enabled"`
+	// SnapshotDir 快照存储目录
+	SnapshotDir string `yaml:"snapshot_dir"`
+	// BuildWorkers 构建工作协程数
+	BuildWorkers int `yaml:"build_workers"`
+	// BuildTimeout 构建超时时间
+	BuildTimeout time.Duration `yaml:"build_timeout"`
+	// WarmupOnBuild 是否在构建时执行预热调用
+	WarmupOnBuild bool `yaml:"warmup_on_build"`
+	// SnapshotTTL 快照 TTL（默认 7 天）
+	SnapshotTTL time.Duration `yaml:"snapshot_ttl"`
+	// CleanupInterval 清理间隔
+	CleanupInterval time.Duration `yaml:"cleanup_interval"`
+	// MaxSnapshotsPerFunction 单个函数最大快照数
+	MaxSnapshotsPerFunction int `yaml:"max_snapshots_per_function"`
+}
+
+// StateConfig 有状态函数配置结构体。
+// 用于配置函数状态管理功能。
+type StateConfig struct {
+	// Enabled 是否启用状态功能
+	Enabled bool `yaml:"enabled"`
+	// RedisDB 状态存储使用的 Redis DB 号（与其他功能隔离）
+	RedisDB int `yaml:"redis_db"`
+	// DefaultTTL 默认状态 TTL（秒），0 表示永不过期
+	DefaultTTL int `yaml:"default_ttl"`
+	// MaxStateSize 单个状态值的最大大小（字节）
+	MaxStateSize int `yaml:"max_state_size"`
+	// MaxKeysPerSession 每个会话的最大 key 数量
+	MaxKeysPerSession int `yaml:"max_keys_per_session"`
+	// SessionAffinityEnabled 是否启用会话亲和性
+	SessionAffinityEnabled bool `yaml:"session_affinity_enabled"`
+	// SessionTimeout 会话超时（秒）
+	SessionTimeout int `yaml:"session_timeout"`
+	// CacheTTL 本地缓存 TTL（秒）
+	CacheTTL int `yaml:"cache_ttl"`
+}
+
 // Load 从指定路径加载配置文件。
 // 该函数会读取 YAML 配置文件，应用默认值，并处理环境变量覆盖。
 //
@@ -526,5 +572,24 @@ func (c *Config) applyDefaults() {
 	// RecoveryInterval 默认为 30 秒
 	if c.Workflow.RecoveryInterval == 0 {
 		c.Workflow.RecoveryInterval = 30 * time.Second
+	}
+	// 快照配置默认值
+	if c.Snapshot.SnapshotDir == "" {
+		c.Snapshot.SnapshotDir = "/var/nimbus/snapshots"
+	}
+	if c.Snapshot.BuildWorkers == 0 {
+		c.Snapshot.BuildWorkers = 2
+	}
+	if c.Snapshot.BuildTimeout == 0 {
+		c.Snapshot.BuildTimeout = 60 * time.Second
+	}
+	if c.Snapshot.SnapshotTTL == 0 {
+		c.Snapshot.SnapshotTTL = 168 * time.Hour // 7 days
+	}
+	if c.Snapshot.CleanupInterval == 0 {
+		c.Snapshot.CleanupInterval = time.Hour
+	}
+	if c.Snapshot.MaxSnapshotsPerFunction == 0 {
+		c.Snapshot.MaxSnapshotsPerFunction = 3
 	}
 }

@@ -447,6 +447,10 @@ func (s *PostgresStore) migrate() error {
 		// 为 webhook_key 创建索引，便于通过 webhook_key 查找函数
 		`CREATE INDEX IF NOT EXISTS idx_functions_webhook_key ON functions(webhook_key) WHERE webhook_key IS NOT NULL`,
 
+		// ==================== 有状态函数 ====================
+		// 为 functions 表添加状态配置字段
+		`ALTER TABLE functions ADD COLUMN IF NOT EXISTS state_config JSONB`,
+
 		// ==================== 工作流编排 ====================
 		// 创建 workflows 表 - 存储工作流定义
 		`CREATE TABLE IF NOT EXISTS workflows (
@@ -552,6 +556,31 @@ func (s *PostgresStore) migrate() error {
 		`ALTER TABLE workflow_executions ADD COLUMN IF NOT EXISTS paused_at_state VARCHAR(128)`,
 		`ALTER TABLE workflow_executions ADD COLUMN IF NOT EXISTS paused_input JSONB`,
 		`ALTER TABLE workflow_executions ADD COLUMN IF NOT EXISTS paused_at TIMESTAMP WITH TIME ZONE`,
+
+		// 创建 function_snapshots 表 - 存储函数级快照
+		`CREATE TABLE IF NOT EXISTS function_snapshots (
+			id VARCHAR(36) PRIMARY KEY,
+			function_id VARCHAR(36) NOT NULL REFERENCES functions(id) ON DELETE CASCADE,
+			version INTEGER NOT NULL,
+			code_hash VARCHAR(64) NOT NULL,
+			runtime VARCHAR(32) NOT NULL,
+			memory_mb INTEGER NOT NULL,
+			env_vars_hash VARCHAR(64),
+			snapshot_path VARCHAR(512) NOT NULL,
+			mem_file_size BIGINT,
+			state_file_size BIGINT,
+			status VARCHAR(32) DEFAULT 'building',
+			error_message TEXT,
+			restore_count INTEGER DEFAULT 0,
+			avg_restore_ms FLOAT DEFAULT 0,
+			created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+			last_used_at TIMESTAMP WITH TIME ZONE,
+			expires_at TIMESTAMP WITH TIME ZONE,
+			UNIQUE(function_id, version, code_hash, env_vars_hash)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_snapshots_function_id ON function_snapshots(function_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_snapshots_status ON function_snapshots(status)`,
+		`CREATE INDEX IF NOT EXISTS idx_snapshots_expires_at ON function_snapshots(expires_at)`,
 	}
 
 	// 依次执行所有迁移语句
@@ -569,6 +598,14 @@ func (s *PostgresStore) migrate() error {
 //   - error: 关闭连接时的错误信息，成功则为 nil
 func (s *PostgresStore) Close() error {
 	return s.db.Close()
+}
+
+// DB 返回底层数据库连接，供需要直接访问数据库的组件使用。
+//
+// 返回值:
+//   - *sql.DB: 数据库连接实例
+func (s *PostgresStore) DB() *sql.DB {
+	return s.db
 }
 
 // ==================== 函数仓库实现 ====================
@@ -626,7 +663,7 @@ func (s *PostgresStore) CreateFunction(fn *domain.Function) error {
 func (s *PostgresStore) GetFunctionByID(id string) (*domain.Function, error) {
 	// SQL: 根据 ID 查询函数的所有字段
 	query := `
-		SELECT id, name, description, tags, pinned, runtime, handler, code, "binary", code_hash, memory_mb, timeout_sec, max_concurrency, env_vars, status, status_message, task_id, version, cron_expression, http_path, http_methods, webhook_enabled, webhook_key, last_deployed_at, created_at, updated_at
+		SELECT id, name, description, tags, pinned, runtime, handler, code, "binary", code_hash, memory_mb, timeout_sec, max_concurrency, env_vars, status, status_message, task_id, version, cron_expression, http_path, http_methods, webhook_enabled, webhook_key, last_deployed_at, state_config, created_at, updated_at
 		FROM functions WHERE id = $1
 	`
 	return s.scanFunction(s.db.QueryRow(query, id))
@@ -643,7 +680,7 @@ func (s *PostgresStore) GetFunctionByID(id string) (*domain.Function, error) {
 func (s *PostgresStore) GetFunctionByName(name string) (*domain.Function, error) {
 	// SQL: 根据名称查询函数的所有字段
 	query := `
-		SELECT id, name, description, tags, pinned, runtime, handler, code, "binary", code_hash, memory_mb, timeout_sec, max_concurrency, env_vars, status, status_message, task_id, version, cron_expression, http_path, http_methods, webhook_enabled, webhook_key, last_deployed_at, created_at, updated_at
+		SELECT id, name, description, tags, pinned, runtime, handler, code, "binary", code_hash, memory_mb, timeout_sec, max_concurrency, env_vars, status, status_message, task_id, version, cron_expression, http_path, http_methods, webhook_enabled, webhook_key, last_deployed_at, state_config, created_at, updated_at
 		FROM functions WHERE name = $1
 	`
 	return s.scanFunction(s.db.QueryRow(query, name))
@@ -660,7 +697,7 @@ func (s *PostgresStore) GetFunctionByName(name string) (*domain.Function, error)
 func (s *PostgresStore) GetFunctionByWebhookKey(webhookKey string) (*domain.Function, error) {
 	// SQL: 根据 Webhook 密钥查询函数的所有字段
 	query := `
-		SELECT id, name, description, tags, pinned, runtime, handler, code, "binary", code_hash, memory_mb, timeout_sec, max_concurrency, env_vars, status, status_message, task_id, version, cron_expression, http_path, http_methods, webhook_enabled, webhook_key, last_deployed_at, created_at, updated_at
+		SELECT id, name, description, tags, pinned, runtime, handler, code, "binary", code_hash, memory_mb, timeout_sec, max_concurrency, env_vars, status, status_message, task_id, version, cron_expression, http_path, http_methods, webhook_enabled, webhook_key, last_deployed_at, state_config, created_at, updated_at
 		FROM functions WHERE webhook_key = $1 AND webhook_enabled = TRUE
 	`
 	return s.scanFunction(s.db.QueryRow(query, webhookKey))
@@ -686,7 +723,7 @@ func (s *PostgresStore) ListFunctions(offset, limit int) ([]*domain.Function, in
 
 	// SQL: 分页查询函数列表，置顶函数优先，按创建时间倒序排列
 	query := `
-		SELECT id, name, description, tags, pinned, runtime, handler, code, "binary", code_hash, memory_mb, timeout_sec, max_concurrency, env_vars, status, status_message, task_id, version, cron_expression, http_path, http_methods, webhook_enabled, webhook_key, last_deployed_at, created_at, updated_at
+		SELECT id, name, description, tags, pinned, runtime, handler, code, "binary", code_hash, memory_mb, timeout_sec, max_concurrency, env_vars, status, status_message, task_id, version, cron_expression, http_path, http_methods, webhook_enabled, webhook_key, last_deployed_at, state_config, created_at, updated_at
 		FROM functions ORDER BY pinned DESC, created_at DESC LIMIT $1 OFFSET $2
 	`
 	rows, err := s.db.Query(query, limit, offset)
@@ -805,6 +842,12 @@ func (s *PostgresStore) UpdateFunction(fn *domain.Function) error {
 	envVarsJSON, _ := json.Marshal(fn.EnvVars)
 	httpMethodsJSON, _ := json.Marshal(fn.HTTPMethods)
 
+	// 处理 StateConfig JSON
+	var stateConfigJSON []byte
+	if fn.StateConfig != nil {
+		stateConfigJSON, _ = json.Marshal(fn.StateConfig)
+	}
+
 	// 处理 WebhookKey：空字符串转为 NULL，避免 UNIQUE 约束冲突
 	var webhookKey interface{}
 	if fn.WebhookKey != "" {
@@ -816,13 +859,13 @@ func (s *PostgresStore) UpdateFunction(fn *domain.Function) error {
 		UPDATE functions SET
 			description = $2, tags = $3, pinned = $4, handler = $5, code = $6, "binary" = $7, code_hash = $8,
 			memory_mb = $9, timeout_sec = $10, max_concurrency = $11, env_vars = $12, status = $13, status_message = $14, task_id = $15,
-			version = $16, cron_expression = $17, http_path = $18, http_methods = $19, webhook_enabled = $20, webhook_key = $21, last_deployed_at = $22, updated_at = $23
+			version = $16, cron_expression = $17, http_path = $18, http_methods = $19, webhook_enabled = $20, webhook_key = $21, last_deployed_at = $22, state_config = $23, updated_at = $24
 		WHERE id = $1
 	`
 	result, err := s.db.Exec(query,
 		fn.ID, fn.Description, pq.Array(fn.Tags), fn.Pinned, fn.Handler, fn.Code, fn.Binary, fn.CodeHash,
 		fn.MemoryMB, fn.TimeoutSec, fn.MaxConcurrency, envVarsJSON, fn.Status, fn.StatusMessage, fn.TaskID,
-		fn.Version, fn.CronExpression, fn.HTTPPath, httpMethodsJSON, fn.WebhookEnabled, webhookKey, fn.LastDeployedAt, fn.UpdatedAt,
+		fn.Version, fn.CronExpression, fn.HTTPPath, httpMethodsJSON, fn.WebhookEnabled, webhookKey, fn.LastDeployedAt, stateConfigJSON, fn.UpdatedAt,
 	)
 	if err != nil {
 		return err
@@ -967,13 +1010,13 @@ func (s *PostgresStore) UpdateFunctionPin(id string, pinned bool) error {
 //   - error: 扫描失败或记录不存在时返回错误
 func (s *PostgresStore) scanFunction(row *sql.Row) (*domain.Function, error) {
 	fn := &domain.Function{}
-	var envVarsJSON, httpMethodsJSON []byte
+	var envVarsJSON, httpMethodsJSON, stateConfigJSON []byte
 	var description, code, binary, codeHash, cronExpression, httpPath, statusMessage, taskID, webhookKey sql.NullString
 	var lastDeployedAt sql.NullTime
 	err := row.Scan(
 		&fn.ID, &fn.Name, &description, pq.Array(&fn.Tags), &fn.Pinned, &fn.Runtime, &fn.Handler, &code, &binary, &codeHash,
 		&fn.MemoryMB, &fn.TimeoutSec, &fn.MaxConcurrency, &envVarsJSON, &fn.Status, &statusMessage, &taskID, &fn.Version,
-		&cronExpression, &httpPath, &httpMethodsJSON, &fn.WebhookEnabled, &webhookKey, &lastDeployedAt, &fn.CreatedAt, &fn.UpdatedAt,
+		&cronExpression, &httpPath, &httpMethodsJSON, &fn.WebhookEnabled, &webhookKey, &lastDeployedAt, &stateConfigJSON, &fn.CreatedAt, &fn.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, domain.ErrFunctionNotFound
@@ -1015,6 +1058,9 @@ func (s *PostgresStore) scanFunction(row *sql.Row) (*domain.Function, error) {
 	// 反序列化 JSON 字段
 	json.Unmarshal(envVarsJSON, &fn.EnvVars)
 	json.Unmarshal(httpMethodsJSON, &fn.HTTPMethods)
+	if len(stateConfigJSON) > 0 {
+		json.Unmarshal(stateConfigJSON, &fn.StateConfig)
+	}
 	return fn, nil
 }
 
@@ -1029,13 +1075,13 @@ func (s *PostgresStore) scanFunction(row *sql.Row) (*domain.Function, error) {
 //   - error: 扫描失败时返回错误
 func (s *PostgresStore) scanFunctionRow(rows *sql.Rows) (*domain.Function, error) {
 	fn := &domain.Function{}
-	var envVarsJSON, httpMethodsJSON []byte
+	var envVarsJSON, httpMethodsJSON, stateConfigJSON []byte
 	var description, code, binary, codeHash, cronExpression, httpPath, statusMessage, taskID, webhookKey sql.NullString
 	var lastDeployedAt sql.NullTime
 	err := rows.Scan(
 		&fn.ID, &fn.Name, &description, pq.Array(&fn.Tags), &fn.Pinned, &fn.Runtime, &fn.Handler, &code, &binary, &codeHash,
 		&fn.MemoryMB, &fn.TimeoutSec, &fn.MaxConcurrency, &envVarsJSON, &fn.Status, &statusMessage, &taskID, &fn.Version,
-		&cronExpression, &httpPath, &httpMethodsJSON, &fn.WebhookEnabled, &webhookKey, &lastDeployedAt, &fn.CreatedAt, &fn.UpdatedAt,
+		&cronExpression, &httpPath, &httpMethodsJSON, &fn.WebhookEnabled, &webhookKey, &lastDeployedAt, &stateConfigJSON, &fn.CreatedAt, &fn.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -1074,6 +1120,9 @@ func (s *PostgresStore) scanFunctionRow(rows *sql.Rows) (*domain.Function, error
 	// 反序列化 JSON 字段
 	json.Unmarshal(envVarsJSON, &fn.EnvVars)
 	json.Unmarshal(httpMethodsJSON, &fn.HTTPMethods)
+	if len(stateConfigJSON) > 0 {
+		json.Unmarshal(stateConfigJSON, &fn.StateConfig)
+	}
 	return fn, nil
 }
 
