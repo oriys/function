@@ -1,0 +1,12 @@
+FROM python:3.11-alpine
+
+# 安装调试依赖（在构建时安装，避免运行时下载）
+RUN pip install --no-cache-dir debugpy
+
+# 创建非 root 用户
+RUN adduser -D func || true
+
+WORKDIR /tmp
+
+# 默认入口点
+ENTRYPOINT ["python3"]

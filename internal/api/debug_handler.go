@@ -759,8 +759,8 @@ func (h *DebugHandler) launchDebugContainer(sessionID string, fn *domain.Functio
 
 	switch fn.Runtime {
 	case domain.RuntimePython311:
-		// 使用预装了 debugpy 的镜像，避免每次启动都 pip install
-		imageName = "function-runtime-python:latest"
+		// 使用预装了 debugpy 的调试专用镜像
+		imageName = "function-runtime-python-debug:latest"
 		containerDebugPort = 5678
 		// 使用 python -m debugpy 命令行模式启动调试
 		// 将用户代码写入 handler.py

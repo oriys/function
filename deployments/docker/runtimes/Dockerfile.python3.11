@@ -1,8 +1,5 @@
 FROM python:3.11-alpine
 
-# 安装 debugpy 用于调试支持
-RUN pip install --no-cache-dir debugpy
-
 RUN adduser -D func || true
 
 WORKDIR /app
