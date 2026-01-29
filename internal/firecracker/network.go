@@ -9,6 +9,7 @@ package firecracker
 
 import (
 	"crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"net"
 	"os/exec"
@@ -36,8 +37,14 @@ type NetworkManager struct {
 
 	mu         sync.Mutex        // 保护并发访问的互斥锁
 	usedIPs    map[string]bool   // 已分配的 IP 地址集合
+	ipByVMID   map[string]string // vmID -> guestIP
 	tapDevices map[string]string // vmID -> TAP 设备名称的映射
-	nextIP     int               // 下一个可分配的 IP 地址（末位）
+
+	subnet      *net.IPNet // 可分配的子网（IPv4）
+	subnetFirst uint32     // 第一个可用主机地址（含）
+	subnetLast  uint32     // 最后一个可用主机地址（含）
+	nextIP      uint32     // 下一次尝试分配的 IP（uint32）
+	netmask     string     // 子网掩码（点分十进制）
 }
 
 // NewNetworkManager 创建新的网络管理器。
@@ -50,12 +57,27 @@ type NetworkManager struct {
 //   - *NetworkManager: 配置好的网络管理器
 //   - error: 初始化过程中的错误
 func NewNetworkManager(cfg config.NetworkConfig, logger *logrus.Logger) (*NetworkManager, error) {
+	subnet, first, last, netmask, err := parseIPv4Subnet(cfg.SubnetCIDR)
+	if err != nil {
+		return nil, fmt.Errorf("invalid subnet_cidr %q: %w", cfg.SubnetCIDR, err)
+	}
+	if ip := net.ParseIP(cfg.BridgeIP); ip == nil || ip.To4() == nil {
+		return nil, fmt.Errorf("invalid bridge_ip %q", cfg.BridgeIP)
+	} else if !subnet.Contains(ip) {
+		return nil, fmt.Errorf("bridge_ip %q is not within subnet_cidr %q", cfg.BridgeIP, cfg.SubnetCIDR)
+	}
+
 	nm := &NetworkManager{
-		cfg:        cfg,
-		logger:     logger,
-		usedIPs:    make(map[string]bool),
-		tapDevices: make(map[string]string),
-		nextIP:     2, // 从 .2 开始分配，.1 保留给网关
+		cfg:         cfg,
+		logger:      logger,
+		usedIPs:     make(map[string]bool),
+		ipByVMID:    make(map[string]string),
+		tapDevices:  make(map[string]string),
+		subnet:      subnet,
+		subnetFirst: first,
+		subnetLast:  last,
+		nextIP:      first, // 从子网第一个可用地址开始，分配时会跳过网关等保留地址
+		netmask:     netmask,
 	}
 
 	// 初始化网桥（如果不存在）
@@ -81,8 +103,12 @@ func (nm *NetworkManager) setupBridge() error {
 		return fmt.Errorf("failed to create bridge: %w", err)
 	}
 
-	// 为网桥设置 IP 地址（使用 /16 子网）
-	if err := exec.Command("ip", "addr", "add", nm.cfg.BridgeIP+"/16", "dev", nm.cfg.BridgeName).Run(); err != nil {
+	// 为网桥设置 IP 地址（使用 subnet_cidr 的掩码长度）
+	prefixLen, err := subnetPrefixLen(nm.subnet)
+	if err != nil {
+		return fmt.Errorf("invalid subnet mask: %w", err)
+	}
+	if err := exec.Command("ip", "addr", "add", fmt.Sprintf("%s/%d", nm.cfg.BridgeIP, prefixLen), "dev", nm.cfg.BridgeName).Run(); err != nil {
 		return fmt.Errorf("failed to set bridge IP: %w", err)
 	}
 
@@ -167,7 +193,11 @@ func (nm *NetworkManager) SetupNetwork(vmID string) (*NetworkConfig, error) {
 	}
 
 	// 分配 IP 地址
-	guestIP := nm.allocateIP()
+	guestIP, err := nm.allocateIPLocked()
+	if err != nil {
+		exec.Command("ip", "link", "del", tapName).Run()
+		return nil, err
+	}
 
 	// 生成随机 MAC 地址
 	mac := nm.generateMAC()
@@ -175,13 +205,14 @@ func (nm *NetworkManager) SetupNetwork(vmID string) (*NetworkConfig, error) {
 	// 记录分配的资源
 	nm.tapDevices[vmID] = tapName
 	nm.usedIPs[guestIP] = true
+	nm.ipByVMID[vmID] = guestIP
 
 	config := &NetworkConfig{
 		TapDevice:  tapName,
 		MacAddress: mac,
 		GuestIP:    guestIP,
 		GatewayIP:  nm.cfg.BridgeIP,
-		SubnetMask: "255.255.0.0",
+		SubnetMask: nm.netmask,
 	}
 
 	nm.logger.WithFields(logrus.Fields{
@@ -212,6 +243,12 @@ func (nm *NetworkManager) CleanupNetwork(vmID string) error {
 
 	delete(nm.tapDevices, vmID)
 
+	// 释放 IP
+	if ip, ok := nm.ipByVMID[vmID]; ok {
+		delete(nm.usedIPs, ip)
+		delete(nm.ipByVMID, vmID)
+	}
+
 	nm.logger.WithFields(logrus.Fields{
 		"vm_id": vmID,
 		"tap":   tapName,
@@ -220,21 +257,33 @@ func (nm *NetworkManager) CleanupNetwork(vmID string) error {
 	return nil
 }
 
-// allocateIP 分配一个 IP 地址。
-// 使用简单的顺序分配策略，在 172.20.0.0/16 子网内分配。
-func (nm *NetworkManager) allocateIP() string {
-	// 在 172.20.0.0/16 子网内顺序分配 IP
+// allocateIPLocked 分配一个未占用的 IPv4 地址。
+// 必须在 nm.mu 持有状态下调用。
+func (nm *NetworkManager) allocateIPLocked() (string, error) {
+	gateway, err := parseIPv4ToUint32(nm.cfg.BridgeIP)
+	if err != nil {
+		return "", fmt.Errorf("invalid bridge_ip %q: %w", nm.cfg.BridgeIP, err)
+	}
+
+	// 完整遍历一轮，找不到则认为耗尽
+	start := nm.nextIP
 	for {
-		// 计算 IP 地址的第三和第四字节
-		ip := fmt.Sprintf("172.20.%d.%d", nm.nextIP/256, nm.nextIP%256)
+		candidate := nm.nextIP
 		nm.nextIP++
-		// 如果超过范围，回到起始位置
-		if nm.nextIP > 65534 {
-			nm.nextIP = 2
+		if nm.nextIP > nm.subnetLast {
+			nm.nextIP = nm.subnetFirst
 		}
-		// 确保 IP 未被使用
-		if !nm.usedIPs[ip] {
-			return ip
+
+		// 跳过网关地址 / 已占用地址
+		if candidate != gateway {
+			ipStr := uint32ToIPv4(candidate).String()
+			if !nm.usedIPs[ipStr] {
+				return ipStr, nil
+			}
+		}
+
+		if nm.nextIP == start {
+			return "", fmt.Errorf("no available IPs in subnet %s", nm.cfg.SubnetCIDR)
 		}
 	}
 }
@@ -263,7 +312,81 @@ func (nm *NetworkManager) Shutdown() error {
 			nm.logger.WithError(err).WithField("tap", tapName).Warn("Failed to delete tap device")
 		}
 		delete(nm.tapDevices, vmID)
+		if ip, ok := nm.ipByVMID[vmID]; ok {
+			delete(nm.usedIPs, ip)
+			delete(nm.ipByVMID, vmID)
+		}
 	}
 
 	return nil
+}
+
+func parseIPv4Subnet(cidr string) (*net.IPNet, uint32, uint32, string, error) {
+	ip, ipNet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return nil, 0, 0, "", err
+	}
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return nil, 0, 0, "", fmt.Errorf("only IPv4 is supported")
+	}
+	ones, bits := ipNet.Mask.Size()
+	if bits != 32 {
+		return nil, 0, 0, "", fmt.Errorf("only IPv4 is supported")
+	}
+	if ones > 30 {
+		return nil, 0, 0, "", fmt.Errorf("subnet too small: /%d", ones)
+	}
+
+	base, err := ipv4ToUint32(ipNet.IP)
+	if err != nil {
+		return nil, 0, 0, "", err
+	}
+	hostBits := uint32(32 - ones)
+	// usable: [base+1, base+(2^hostBits)-2]
+	first := base + 1
+	last := base + (1 << hostBits) - 2
+
+	_ = ip4 // validated above; ipNet.IP already contains the masked network address
+	return &net.IPNet{IP: ipNet.IP.To4(), Mask: ipNet.Mask}, first, last, maskToDottedDecimal(ipNet.Mask), nil
+}
+
+func subnetPrefixLen(subnet *net.IPNet) (int, error) {
+	if subnet == nil {
+		return 0, fmt.Errorf("nil subnet")
+	}
+	ones, bits := subnet.Mask.Size()
+	if bits != 32 {
+		return 0, fmt.Errorf("only IPv4 is supported")
+	}
+	return ones, nil
+}
+
+func maskToDottedDecimal(mask net.IPMask) string {
+	if len(mask) != 4 {
+		return ""
+	}
+	return fmt.Sprintf("%d.%d.%d.%d", mask[0], mask[1], mask[2], mask[3])
+}
+
+func parseIPv4ToUint32(s string) (uint32, error) {
+	ip := net.ParseIP(s)
+	if ip == nil {
+		return 0, fmt.Errorf("invalid IP")
+	}
+	return ipv4ToUint32(ip)
+}
+
+func ipv4ToUint32(ip net.IP) (uint32, error) {
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return 0, fmt.Errorf("not IPv4")
+	}
+	return binary.BigEndian.Uint32(ip4), nil
+}
+
+func uint32ToIPv4(n uint32) net.IP {
+	b := make([]byte, 4)
+	binary.BigEndian.PutUint32(b, n)
+	return net.IP(b)
 }

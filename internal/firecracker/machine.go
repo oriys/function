@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -61,9 +62,9 @@ type MachineManager struct {
 	networkMgr *NetworkManager          // 网络管理器
 	logger     *logrus.Logger           // 日志记录器
 
-	mu      sync.RWMutex      // 保护 vms 映射的读写锁
-	vms     map[string]*VM    // vmID -> VM 的映射
-	nextCID uint32            // 下一个可分配的 CID
+	mu      sync.RWMutex   // 保护 vms 映射的读写锁
+	vms     map[string]*VM // vmID -> VM 的映射
+	nextCID uint32         // 下一个可分配的 CID
 }
 
 // NewMachineManager 创建新的虚拟机管理器。
@@ -221,7 +222,7 @@ func (m *MachineManager) buildFirecrackerConfig(vm *VM, rootfsPath string, netCo
 		SocketPath:      vm.SocketPath,
 		KernelImagePath: m.cfg.Kernel,
 		// 内核启动参数：控制台输出、panic 时重启、禁用 PCI、指定 init 进程
-		KernelArgs: "console=ttyS0 reboot=k panic=1 pci=off init=/sbin/init",
+		KernelArgs: m.buildKernelArgs(netConfig),
 		// 磁盘配置
 		Drives: []models.Drive{
 			{
@@ -253,6 +254,21 @@ func (m *MachineManager) buildFirecrackerConfig(vm *VM, rootfsPath string, netCo
 			},
 		},
 	}
+}
+
+func (m *MachineManager) buildKernelArgs(netConfig *NetworkConfig) string {
+	args := []string{
+		"console=ttyS0",
+		"reboot=k",
+		"panic=1",
+		"pci=off",
+		"init=/init",
+	}
+	// 为 guest 配置静态网络（避免依赖 DHCP）
+	if netConfig != nil && netConfig.GuestIP != "" && netConfig.GatewayIP != "" && netConfig.SubnetMask != "" {
+		args = append(args, fmt.Sprintf("ip=%s::%s:%s::eth0:off", netConfig.GuestIP, netConfig.GatewayIP, netConfig.SubnetMask))
+	}
+	return strings.Join(args, " ")
 }
 
 // GetVM 根据 ID 获取虚拟机。
@@ -393,7 +409,7 @@ func (m *MachineManager) CreateSnapshot(ctx context.Context, vmID, snapshotID st
 	snapshotDir := filepath.Join(m.cfg.SnapshotDir, snapshotID)
 	os.MkdirAll(snapshotDir, 0755)
 
-	memFilePath := filepath.Join(snapshotDir, "mem")      // 内存快照文件
+	memFilePath := filepath.Join(snapshotDir, "mem")       // 内存快照文件
 	snapshotPath := filepath.Join(snapshotDir, "snapshot") // 状态快照文件
 
 	// 暂停虚拟机以创建一致的快照

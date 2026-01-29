@@ -1,0 +1,57 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: nimbus
+      POSTGRES_USER: nimbus
+      POSTGRES_PASSWORD: nimbus
+    volumes:
+      - nimbus-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nimbus -d nimbus"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - nimbus-redis:/data
+    restart: unless-stopped
+
+  gateway:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile
+    privileged: true
+    devices:
+      - /dev/kvm:/dev/kvm
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - ./config.yaml:/etc/nimbus/config.yaml:ro
+      - nimbus-fc-rootfs:/opt/firecracker/rootfs
+      - nimbus-fc-sockets:/opt/firecracker/sockets
+      - nimbus-fc-vsock:/opt/firecracker/vsock
+      - nimbus-fc-snapshots:/opt/firecracker/snapshots
+      - nimbus-fc-logs:/opt/firecracker/logs
+    ports:
+      - "8080:8080"
+      - "8081:8081"
+      - "9090:9090"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  nimbus-postgres:
+  nimbus-redis:
+  nimbus-fc-rootfs:
+  nimbus-fc-sockets:
+  nimbus-fc-vsock:
+  nimbus-fc-snapshots:
+  nimbus-fc-logs:

@@ -1,0 +1,100 @@
+# ============================================================================
+# Seed Functions Job
+# ============================================================================
+# 在 Gateway 启动后自动创建示例函数（Python/Node.js）
+# ============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: seed-functions
+  namespace: nimbus
+  labels:
+    app.kubernetes.io/name: seed-functions
+    app.kubernetes.io/component: initialization
+spec:
+  ttlSecondsAfterFinished: 300
+  backoffLimit: 5
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: seed-functions
+    spec:
+      restartPolicy: OnFailure
+      initContainers:
+        - name: wait-for-gateway
+          image: curlimages/curl:8.5.0
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Waiting for Gateway to be ready..."
+              until curl -sf http://nimbus-gateway:8080/health/ready; do
+                echo "Gateway not ready, waiting..."
+                sleep 5
+              done
+              echo "Gateway is ready!"
+      containers:
+        - name: seed-functions
+          image: curlimages/curl:8.5.0
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              GATEWAY_URL="http://nimbus-gateway:8080/api/v1/functions"
+
+              echo "=== Seeding example functions ==="
+
+              create_function() {
+                local name="$1"
+                local json="$2"
+
+                echo "Creating function: $name"
+                response=$(curl -s -w "\n%{http_code}" -X POST "$GATEWAY_URL" \
+                  -H "Content-Type: application/json" \
+                  -d "$json")
+
+                http_code=$(echo "$response" | tail -n1)
+                body=$(echo "$response" | sed '$d')
+
+                if [ "$http_code" = "201" ]; then
+                  echo "  ✓ Created successfully"
+                elif [ "$http_code" = "409" ]; then
+                  echo "  ○ Already exists, skipping"
+                else
+                  echo "  ✗ Failed (HTTP $http_code): $body"
+                fi
+              }
+
+              create_function "echo-python" '{
+                "name": "echo-python",
+                "description": "Simple echo function that returns the input as-is",
+                "runtime": "python3.11",
+                "handler": "handler.handle",
+                "memory_mb": 128,
+                "timeout_sec": 5,
+                "code": "def handle(event, context):\n    return {\n        \"statusCode\": 200,\n        \"body\": {\n            \"echo\": event,\n            \"message\": \"Echo successful\"\n        }\n    }"
+              }'
+
+              create_function "hello-python" '{
+                "name": "hello-python",
+                "description": "A classic Hello World example in Python 3.11",
+                "runtime": "python3.11",
+                "handler": "handler.handle",
+                "memory_mb": 128,
+                "timeout_sec": 5,
+                "code": "def handle(event, context):\n    name = event.get(\"name\", \"World\")\n    return {\n        \"statusCode\": 200,\n        \"body\": {\n            \"message\": f\"Hello, {name}!\",\n            \"runtime\": \"python3.11\"\n        }\n    }"
+              }'
+
+              create_function "hello-node" '{
+                "name": "hello-node",
+                "description": "A classic Hello World example in Node.js 20",
+                "runtime": "nodejs20",
+                "handler": "index.handler",
+                "memory_mb": 128,
+                "timeout_sec": 5,
+                "code": "exports.handler = async (event) => {\\n  const name = event.name || \\\"World\\\";\\n  return { statusCode: 200, body: { message: `Hello, ${name}!`, runtime: \\\"nodejs20\\\" } };\\n};"
+              }'
+
+              echo ""
+              echo "=== Seed completed ==="

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/oriys/nimbus/internal/domain"
 	fc "github.com/oriys/nimbus/internal/firecracker"
@@ -62,6 +63,15 @@ func (b *FirecrackerBuilder) BuildSnapshot(ctx context.Context, fn *domain.Funct
 	// 2. 连接 vsock 并初始化函数
 	client := fc.NewVsockClient(vm.VsockCID, b.logger)
 	defer client.Close()
+
+	if err := client.Connect(ctx); err != nil {
+		return 0, 0, fmt.Errorf("failed to connect vsock: %w", err)
+	}
+	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := client.Ping(pingCtx); err != nil {
+		return 0, 0, fmt.Errorf("failed to ping agent: %w", err)
+	}
 
 	// 3. 发送 InitPayload
 	initPayload := &fc.InitPayload{

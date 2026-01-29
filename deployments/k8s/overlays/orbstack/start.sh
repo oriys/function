@@ -2,12 +2,20 @@
 # ============================================================================
 # Nimbus Platform - OrbStack 一键启动脚本
 # ============================================================================
-# 用法: ./start.sh [--rebuild] [--skip-images]
+# 用法:
+#   ./start.sh [--profile orbstack|kvm|auto] [--context <ctx>] [--image <gateway-image>] [--rebuild] [--skip-images]
 #   --rebuild     强制重新构建所有镜像
 #   --skip-images 跳过镜像构建（假设镜像已存在）
+#   --profile     选择部署 profile：
+#                - orbstack: 本地开发（Docker 模式 + DinD）
+#                - kvm:      Linux(KVM) 集群（Firecracker 模式）
+#                - auto:     根据当前 kubectl context 自动选择（默认）
+#   --context     指定 kubectl context
+#   --image       覆盖 gateway 镜像（仅对 kvm profile 生效，直接 set image）
 # ============================================================================
 
 set -e
+set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
@@ -28,10 +36,32 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 # 解析参数
 REBUILD=false
 SKIP_IMAGES=false
-for arg in "$@"; do
-    case $arg in
-        --rebuild) REBUILD=true ;;
-        --skip-images) SKIP_IMAGES=true ;;
+PROFILE="auto"
+KUBE_CONTEXT=""
+GATEWAY_IMAGE=""
+
+usage() {
+    cat <<EOF
+Usage: ./start.sh [--profile orbstack|kvm|auto] [--context <ctx>] [--image <gateway-image>] [--rebuild] [--skip-images]
+
+Examples:
+  # OrbStack 本地开发（Docker 模式）
+  ./start.sh --profile orbstack
+
+  # Linux(KVM) 集群（Firecracker 模式）
+  ./start.sh --profile kvm --context my-cluster
+EOF
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --rebuild) REBUILD=true; shift ;;
+        --skip-images) SKIP_IMAGES=true; shift ;;
+        --profile) PROFILE="${2:-}"; shift 2 ;;
+        --context) KUBE_CONTEXT="${2:-}"; shift 2 ;;
+        --image) GATEWAY_IMAGE="${2:-}"; shift 2 ;;
+        -h|--help) usage; exit 0 ;;
+        *) log_error "未知参数: $1"; usage; exit 1 ;;
     esac
 done
 
@@ -41,17 +71,59 @@ echo "   Nimbus Platform - OrbStack 一键启动"
 echo "=============================================="
 echo ""
 
-# 检查依赖
+# 检查 kubectl
 log_info "检查依赖..."
 command -v kubectl >/dev/null 2>&1 || { log_error "kubectl 未安装"; exit 1; }
+
+# 切换 context（可选）
+if [ -n "$KUBE_CONTEXT" ]; then
+    log_info "切换 context: $KUBE_CONTEXT"
+    kubectl config use-context "$KUBE_CONTEXT" >/dev/null || { log_error "无法切换到 context: $KUBE_CONTEXT"; exit 1; }
+fi
+
+CURRENT_CONTEXT="$(kubectl config current-context 2>/dev/null || true)"
+if [ -z "$CURRENT_CONTEXT" ]; then
+    log_error "无法获取 kubectl current-context"
+    exit 1
+fi
+
+# auto: 根据 context 选择
+if [ "$PROFILE" = "auto" ]; then
+    if echo "$CURRENT_CONTEXT" | grep -qi "orbstack"; then
+        PROFILE="orbstack"
+    else
+        PROFILE="kvm"
+    fi
+fi
+
+# kvm: 直接转发到 kvm overlay 的 start.sh
+if [ "$PROFILE" = "kvm" ]; then
+    log_success "Kubernetes context: $CURRENT_CONTEXT (profile=kvm)"
+    KVM_START="$PROJECT_ROOT/deployments/k8s/overlays/kvm/start.sh"
+    if [ ! -x "$KVM_START" ]; then
+        log_error "找不到 kvm start 脚本: $KVM_START"
+        exit 1
+    fi
+    args=()
+    if [ -n "$KUBE_CONTEXT" ]; then
+        args+=(--context "$KUBE_CONTEXT")
+    fi
+    if [ -n "$GATEWAY_IMAGE" ]; then
+        args+=(--image "$GATEWAY_IMAGE")
+    fi
+    exec "$KVM_START" "${args[@]}"
+fi
+
+# orbstack: 继续走原逻辑
 command -v docker >/dev/null 2>&1 || { log_error "docker 未安装"; exit 1; }
 
-# 检查 OrbStack k8s
-if ! kubectl config current-context | grep -q "orbstack"; then
-    log_warn "当前 context 不是 orbstack，尝试切换..."
-    kubectl config use-context orbstack || { log_error "无法切换到 orbstack context"; exit 1; }
+if ! echo "$CURRENT_CONTEXT" | grep -qi "orbstack"; then
+    log_warn "当前 context 不是 orbstack（profile=orbstack），尝试切换..."
+    kubectl config use-context orbstack >/dev/null || { log_error "无法切换到 orbstack context"; exit 1; }
+    CURRENT_CONTEXT="$(kubectl config current-context 2>/dev/null || true)"
 fi
-log_success "Kubernetes context: orbstack"
+
+log_success "Kubernetes context: $CURRENT_CONTEXT (profile=orbstack)"
 
 # ============================================================================
 # Step 1: 构建镜像

@@ -1,0 +1,35 @@
+# ============================================================================
+# Kustomize Overlay（kvm）
+# ============================================================================
+# 面向 Linux + KVM 的集群部署：
+# - runtime: firecracker
+# - gateway 需要 privileged + /dev/kvm + /dev/net/tun
+# - 默认删除 base 的 NetworkPolicy（避免在 Calico/Cilium 下阻断出站/依赖访问）
+# ============================================================================
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: nimbus
+
+resources:
+  - ../../base
+  # 依赖
+  - postgres.yaml
+  - redis.yaml
+  - nats.yaml
+  # 对外访问（NodePort）
+  - nimbus-gateway-external-service.yaml
+  # 示例函数
+  - seed-functions-job.yaml
+
+configMapGenerator:
+  - name: nimbus-config
+    behavior: replace
+    files:
+      - config.yaml=nimbus-config.yaml
+
+generatorOptions:
+  disableNameSuffixHash: true
+
+patches:
+  - path: delete-network-policies.yaml

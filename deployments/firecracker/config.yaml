@@ -1,0 +1,99 @@
+# ==============================================================================
+# Nimbus (Firecracker) - single host docker-compose config
+# ==============================================================================
+
+server:
+  http_port: 8080
+  invoke_port: 8081
+  metrics_port: 9090
+  shutdown_timeout: 30s
+
+runtime:
+  mode: firecracker
+
+firecracker:
+  binary: /opt/firecracker/bin/firecracker
+  kernel: /opt/firecracker/kernel/vmlinux
+  rootfs_dir: /opt/firecracker/rootfs
+  socket_dir: /opt/firecracker/sockets
+  vsock_dir: /opt/firecracker/vsock
+  snapshot_dir: /opt/firecracker/snapshots
+  log_dir: /opt/firecracker/logs
+  boot_timeout: 10s
+
+network:
+  bridge_name: fcbr0
+  bridge_ip: 172.20.0.1
+  subnet_cidr: 172.20.0.0/16
+  use_nat: true
+  external_interface: eth0
+
+pool:
+  health_check_interval: 10s
+  scale_check_interval: 30s
+  max_vm_age: 1h
+  max_invocations: 1000
+  use_snapshots: false
+  snapshot_warmup: 0
+  runtimes:
+    - runtime: python3.11
+      min_warm: 1
+      max_total: 20
+      target_warm: 2
+      scale_up_factor: 0.8
+      scale_down_factor: 0.3
+      memory_mb: 256
+      vcpus: 1
+    - runtime: nodejs20
+      min_warm: 1
+      max_total: 20
+      target_warm: 2
+      scale_up_factor: 0.8
+      scale_down_factor: 0.3
+      memory_mb: 256
+      vcpus: 1
+    - runtime: go1.24
+      min_warm: 1
+      max_total: 10
+      target_warm: 1
+      scale_up_factor: 0.8
+      scale_down_factor: 0.3
+      memory_mb: 128
+      vcpus: 1
+    - runtime: wasm
+      min_warm: 1
+      max_total: 50
+      target_warm: 2
+      scale_up_factor: 0.8
+      scale_down_factor: 0.3
+      memory_mb: 64
+      vcpus: 1
+
+scheduler:
+  workers: 10
+  queue_size: 1000
+  default_timeout: 30s
+  max_retries: 3
+
+storage:
+  postgres:
+    host: postgres
+    port: 5432
+    database: nimbus
+    user: nimbus
+    password: nimbus
+    max_connections: 25
+  redis:
+    address: redis:6379
+    db: 0
+
+events:
+  nats_url: nats://localhost:4222
+
+logging:
+  level: info
+  format: json
+
+metrics:
+  enabled: true
+  namespace: nimbus

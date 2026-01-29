@@ -26,6 +26,17 @@ cd deployments/k8s/overlays/orbstack
 ./stop.sh
 ```
 
+### Linux(KVM) / Kubernetes 部署（Firecracker）
+
+适用于 Linux + KVM 的集群部署（Firecracker 模式）：
+
+```bash
+cd deployments/k8s/overlays/kvm
+./start.sh --context <your-context> --image <your-registry>/nimbus:<tag>
+```
+
+详细说明见：`deployments/k8s/overlays/kvm/README.md`
+
 启动后的服务地址：
 
 | 服务 | 地址 |
@@ -33,6 +44,17 @@ cd deployments/k8s/overlays/orbstack
 | API Gateway | http://192.168.139.2:8080 |
 | Web Console | http://localhost:32002 |
 | Grafana | http://192.168.139.2:3000 |
+
+### Linux (KVM) / Firecracker 单机部署（Docker Compose）
+
+适用于你已经有 Linux + KVM 的单机服务器场景：
+
+```bash
+cd deployments/firecracker
+docker compose up -d --build
+```
+
+详细说明见：`deployments/firecracker/README.md`
 
 ### 测试函数调用
 

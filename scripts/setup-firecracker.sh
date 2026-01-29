@@ -8,6 +8,24 @@ FC_VERSION="v1.6.0"
 BASE_DIR="/opt/firecracker"
 ARCH=$(uname -m)
 
+# Architecture mapping
+case "${ARCH}" in
+    x86_64|amd64)
+        FC_ARCH="x86_64"
+        GO_ARCH="amd64"
+        ALPINE_ARCH="x86_64"
+        ;;
+    aarch64|arm64)
+        FC_ARCH="aarch64"
+        GO_ARCH="arm64"
+        ALPINE_ARCH="aarch64"
+        ;;
+    *)
+        echo "Unsupported architecture: ${ARCH}"
+        exit 1
+        ;;
+esac
+
 # Alibaba Cloud mirrors
 ALPINE_MIRROR="https://mirrors.aliyun.com/alpine"
 
@@ -17,7 +35,7 @@ SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 echo "=== Setting up Firecracker ==="
-echo "Architecture: ${ARCH}"
+echo "Architecture: ${ARCH} (firecracker=${FC_ARCH}, go=${GO_ARCH}, alpine=${ALPINE_ARCH})"
 echo "Project: ${PROJECT_DIR}"
 
 # Create directories
@@ -25,26 +43,19 @@ mkdir -p ${BASE_DIR}/{bin,kernel,rootfs,sockets,vsock,snapshots,logs}
 mkdir -p ${BASE_DIR}/rootfs/{python3.11,nodejs20,go1.24,wasm}
 
 # 1. Download Firecracker
-echo "[1/4] Downloading Firecracker ${FC_VERSION}..."
+echo "[1/5] Downloading Firecracker ${FC_VERSION}..."
 cd /tmp
 curl -sSL -o firecracker.tgz \
-  "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-${ARCH}.tgz"
+  "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-${FC_ARCH}.tgz"
 tar xzf firecracker.tgz
-cp release-${FC_VERSION}-${ARCH}/firecracker-${FC_VERSION}-${ARCH} ${BASE_DIR}/bin/firecracker
+cp release-${FC_VERSION}-${FC_ARCH}/firecracker-${FC_VERSION}-${FC_ARCH} ${BASE_DIR}/bin/firecracker
 chmod +x ${BASE_DIR}/bin/firecracker
-rm -rf firecracker.tgz release-${FC_VERSION}-${ARCH}
+rm -rf firecracker.tgz release-${FC_VERSION}-${FC_ARCH}
 echo "✓ Firecracker installed: ${BASE_DIR}/bin/firecracker"
 
 # 2. Download kernel
-echo "[2/4] Downloading Linux kernel for ${ARCH}..."
-if [ "$ARCH" = "x86_64" ]; then
-    KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.6/x86_64/vmlinux-5.10.198"
-elif [ "$ARCH" = "aarch64" ]; then
-    KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.6/aarch64/vmlinux-5.10.198"
-else
-    echo "Unsupported architecture: ${ARCH}"
-    exit 1
-fi
+echo "[2/5] Downloading Linux kernel for ${FC_ARCH}..."
+KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.6/${FC_ARCH}/vmlinux-5.10.198"
 
 curl -sSL -o ${BASE_DIR}/kernel/vmlinux "${KERNEL_URL}"
 
@@ -57,28 +68,21 @@ else
 fi
 
 # 3. Build agent first (needed for rootfs)
-echo "[3/4] Building agent..."
+echo "[3/5] Building agent..."
 cd "${PROJECT_DIR}"
 
 # Install Go if not present
 if ! command -v go &> /dev/null; then
     echo "  Installing Go..."
-    curl -sSL https://go.dev/dl/go1.24.0.linux-${ARCH}.tar.gz | tar -C /usr/local -xz
+    curl -sSL https://go.dev/dl/go1.24.0.linux-${GO_ARCH}.tar.gz | tar -C /usr/local -xz
     export PATH=$PATH:/usr/local/go/bin
 fi
 
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o ${BASE_DIR}/bin/agent ./cmd/agent/
+CGO_ENABLED=0 GOOS=linux GOARCH=${GO_ARCH} go build -o ${BASE_DIR}/bin/agent ./cmd/agent/
 echo "✓ Agent built: ${BASE_DIR}/bin/agent"
 
 # 4. Create minimal Alpine rootfs
-echo "[4/4] Creating rootfs images..."
-
-# Determine Alpine arch name
-if [ "$ARCH" = "x86_64" ]; then
-    ALPINE_ARCH="x86_64"
-elif [ "$ARCH" = "aarch64" ]; then
-    ALPINE_ARCH="aarch64"
-fi
+echo "[4/5] Creating rootfs images..."
 
 create_rootfs() {
     local RUNTIME=$1
@@ -115,6 +119,7 @@ EOF
     fi
 
     # Copy agent
+    mkdir -p ${MOUNT_DIR}/usr/local/bin
     cp ${BASE_DIR}/bin/agent ${MOUNT_DIR}/usr/local/bin/agent
     chmod +x ${MOUNT_DIR}/usr/local/bin/agent
 
