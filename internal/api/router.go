@@ -359,6 +359,8 @@ func NewRouter(cfg *RouterConfig) *chi.Mux {
 		r.Route("/dependencies", func(r chi.Router) {
 			// GET /api/v1/dependencies/graph - 获取依赖关系图
 			r.Get("/graph", h.GetDependencyGraph)
+			// POST /api/v1/dependencies - 添加依赖关系
+			r.Post("/", h.AddDependency)
 		})
 
 		// 快照管理路由组

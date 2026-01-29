@@ -46,24 +46,21 @@ func (b *FirecrackerBuilder) BuildSnapshot(ctx context.Context, fn *domain.Funct
 	}).Info("Building Firecracker snapshot")
 
 	// 1. 创建临时 VM
-	vm, err := b.machinesMgr.CreateVM(ctx, string(fn.Runtime))
+	vm, err := b.machinesMgr.CreateVM(ctx, string(fn.Runtime), int64(fn.MemoryMB), 1)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to create temp VM: %w", err)
 	}
 	defer func() {
 		// 确保清理临时 VM
-		if destroyErr := b.machinesMgr.DestroyVM(ctx, vm.ID); destroyErr != nil {
-			b.logger.WithError(destroyErr).WithField("vm_id", vm.ID).Warn("Failed to destroy temp VM")
+		if stopErr := b.machinesMgr.StopVM(ctx, vm.ID); stopErr != nil {
+			b.logger.WithError(stopErr).WithField("vm_id", vm.ID).Warn("Failed to stop temp VM")
 		}
 	}()
 
 	b.logger.WithField("vm_id", vm.ID).Debug("Temp VM created for snapshot")
 
 	// 2. 连接 vsock 并初始化函数
-	client, err := fc.NewVsockClient(vm.VsockPath, 9999)
-	if err != nil {
-		return 0, 0, fmt.Errorf("failed to connect vsock: %w", err)
-	}
+	client := fc.NewVsockClient(vm.VsockCID, b.logger)
 	defer client.Close()
 
 	// 3. 发送 InitPayload

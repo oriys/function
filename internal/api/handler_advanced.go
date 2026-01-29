@@ -453,6 +453,43 @@ func (h *Handler) GetDependencyGraph(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, graph)
 }
 
+// AddDependency 添加依赖关系
+// POST /api/v1/dependencies
+func (h *Handler) AddDependency(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SourceID string `json:"source_id"`
+		TargetID string `json:"target_id"`
+		Type     string `json:"type"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErrorWithContext(w, r, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// 验证函数存在
+	if _, err := h.store.GetFunctionByID(req.SourceID); err != nil {
+		writeErrorWithContext(w, r, http.StatusBadRequest, "source function not found")
+		return
+	}
+	if _, err := h.store.GetFunctionByID(req.TargetID); err != nil {
+		writeErrorWithContext(w, r, http.StatusBadRequest, "target function not found")
+		return
+	}
+
+	depType := domain.DependencyTypeDirectCall
+	if req.Type != "" {
+		depType = domain.DependencyType(req.Type)
+	}
+
+	if err := h.store.AddFunctionDependency(req.SourceID, req.TargetID, depType); err != nil {
+		h.logError(r, "AddDependency", "添加依赖失败", err, nil)
+		writeErrorWithContext(w, r, http.StatusInternalServerError, "failed to add dependency")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]string{"status": "ok"})
+}
+
 // GetImpactAnalysis 获取影响分析
 // GET /api/v1/functions/{id}/impact
 func (h *Handler) GetImpactAnalysis(w http.ResponseWriter, r *http.Request) {
@@ -480,6 +517,9 @@ func (h *Handler) GetImpactAnalysis(w http.ResponseWriter, r *http.Request) {
 
 	// 获取受影响的工作流
 	affectedWorkflows, _ := h.store.GetWorkflowsUsingFunction(functionID)
+	if affectedWorkflows == nil {
+		affectedWorkflows = []string{}
+	}
 
 	analysis := &domain.ImpactAnalysis{
 		FunctionID:         functionID,

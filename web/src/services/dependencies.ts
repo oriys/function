@@ -50,17 +50,14 @@ export interface FunctionDependencies {
 
 export const dependenciesService = {
   async getGraph(): Promise<DependencyGraph> {
-    const response = await api.get('/api/v1/dependencies/graph')
-    return response.data
+    return api.get('/v1/dependencies/graph') as unknown as DependencyGraph
   },
 
   async getFunctionDependencies(functionId: string): Promise<FunctionDependencies> {
-    const response = await api.get(`/api/v1/functions/${functionId}/dependencies`)
-    return response.data
+    return api.get(`/v1/functions/${functionId}/dependencies`) as unknown as FunctionDependencies
   },
 
   async getImpactAnalysis(functionId: string): Promise<ImpactAnalysis> {
-    const response = await api.get(`/api/v1/functions/${functionId}/impact`)
-    return response.data
+    return api.get(`/v1/functions/${functionId}/impact`) as unknown as ImpactAnalysis
   },
 }

@@ -2,10 +2,12 @@
 package storage
 
 import (
+	"database/sql"
 	"errors"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/oriys/nimbus/internal/domain"
 )
 
